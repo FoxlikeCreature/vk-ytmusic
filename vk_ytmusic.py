@@ -17571,7 +17571,12 @@ def _vk_browser_session():
     sess.headers['User-Agent'] = (
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
         '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    sess.cookies.update(cookies)
+    for k, v in cookies.items():
+        try:
+            v.encode('latin-1')  # HTTP-заголовки принимают только latin-1
+            sess.cookies.set(k, v, domain='.vk.com')
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
     return sess
 
 
