@@ -17290,14 +17290,6 @@ import tempfile
 import time
 from difflib import SequenceMatcher
 
-VK_OAUTH_URL = (
-    "https://oauth.vk.com/authorize"
-    "?client_id=2685278"
-    "&scope=audio,offline"
-    "&redirect_uri=https://oauth.vk.com/blank.html"
-    "&display=page"
-    "&response_type=token"
-)
 VK_API_BASE = "https://api.vk.com/method"
 VK_V = "5.131"
 from typing import Dict, List, Optional
@@ -17340,29 +17332,14 @@ def _wizard_config():
     print(f"\n{C.BOLD}=== Первоначальная настройка ==={C.R}\n")
     print("Конфиг не найден. Сейчас настроим всё вместе.\n")
 
-    print("  1/3  Авторизация ВКонтакте")
-    print("       Сейчас откроется браузер. Нажми «Разрешить»,")
-    print("       потом вставь сюда адресную строку целиком.\n")
-    try:
-        webbrowser.open(VK_OAUTH_URL)
-        print("  (Браузер открылся)\n")
-    except Exception:
-        print(f"  Открой вручную:\n  {VK_OAUTH_URL}\n")
-    input("  Нажал «Разрешить»? Нажми Enter...")
-    print()
-    vk_token = _ask("Адресная строка").strip()
-    if 'access_token=' in vk_token:
-        vk_token = vk_token.split('access_token=', 1)[1].split('&')[0]
-
-    print()
-    print("  2/3  Откуда брать музыку")
+    print("  1/2  Откуда брать музыку")
     print("       Укажи страницу ВК: домен (например durov),")
     print("       числовой ID (123456789) или ссылку (vk.com/durov).\n")
     vk_target = _ask("Страница ВК").strip()
     vk_target = vk_target.replace('https://vk.com/', '').replace('http://vk.com/', '').rstrip('/')
 
     print()
-    print("  3/3  Точность поиска")
+    print("  2/2  Точность поиска")
     print("       0.65 — оптимально для большинства случаев.\n")
     threshold = _ask("Порог совпадения", "0.65")
     try:
@@ -17374,10 +17351,7 @@ def _wizard_config():
         threshold = 0.65
 
     config = {
-        "vk": {
-            "token":  vk_token,
-            "target": vk_target,
-        },
+        "vk": {"target": vk_target},
         "ytmusic": {"auth_file": "browser.json"},
         "options": {
             "match_threshold": threshold,
@@ -17515,28 +17489,42 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 
 
 # =============================================================================
-# VK API
+# VK (через куки браузера — не нужен логин или OAuth)
 # =============================================================================
 
-def _vk_call(method: str, token: str, **params) -> dict:
-    import requests as req_mod
-    r = req_mod.get(f"{VK_API_BASE}/{method}",
-                    params={"access_token": token, "v": VK_V, **params},
-                    timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    if "error" in data:
-        raise RuntimeError(data["error"].get("error_msg", str(data["error"])))
-    return data["response"]
+def _vk_browser_session():
+    """Берёт VK-сессию из браузера пользователя через browser_cookie3."""
+    try:
+        import browser_cookie3
+    except ImportError:
+        return None
+    for extractor in [browser_cookie3.chrome, browser_cookie3.chromium,
+                      browser_cookie3.firefox, browser_cookie3.brave]:
+        try:
+            jar = extractor(domain_name='.vk.com')
+            cookies = {c.name: c.value for c in jar}
+            if 'remixsid' in cookies:
+                import requests as req_mod
+                sess = req_mod.Session()
+                sess.headers['User-Agent'] = (
+                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+                sess.cookies.update(cookies)
+                return sess
+        except Exception:
+            continue
+    return None
 
 
-def _vk_resolve_id(token: str, target: str) -> int:
+def _vk_resolve_id(sess, target: str) -> int:
     try:
         return int(target)
     except ValueError:
         pass
     target = target.lstrip('@').replace('https://vk.com/', '').replace('http://vk.com/', '').rstrip('/')
-    res = _vk_call("utils.resolveScreenName", token, screen_name=target)
+    r = sess.get(f"{VK_API_BASE}/utils.resolveScreenName",
+                 params={"screen_name": target, "v": VK_V}, timeout=30)
+    res = r.json().get("response", {})
     if not res:
         _err(f"Страница '{target}' не найдена.")
         sys.exit(1)
@@ -17553,39 +17541,16 @@ def _get_thumb_url(item: dict) -> str:
     return ''
 
 
-def _get_vk_tracks(token: str, owner_id: int) -> List[Dict]:
+def _get_vk_tracks(sess, owner_id: int) -> List[Dict]:
+    import vk_api as vk_mod
+    # Инжектим браузерные куки в vk_api сессию, пропуская логин
+    vk_sess = vk_mod.VkApi()
+    vk_sess.http.cookies.update(sess.cookies)
+    vk_sess.http.headers.update(sess.headers)
+    from vk_api.audio import VkAudio
     tracks = []
-
-    # Пробуем audio.get (требует audio scope)
     try:
-        offset, count = 0, 200
-        while True:
-            resp = _vk_call("audio.get", token, owner_id=owner_id,
-                            offset=offset, count=count)
-            items = resp.get("items", [])
-            for item in items:
-                tracks.append({
-                    'id':     f"{item.get('owner_id')}_{item.get('id')}",
-                    'artist': (item.get('artist') or '').strip(),
-                    'title':  (item.get('title') or '').strip(),
-                    'url':    item.get('url') or '',
-                    'thumb':  _get_thumb_url(item),
-                })
-            if not items or len(tracks) >= resp.get("count", 0):
-                break
-            offset += count
-        if tracks:
-            return tracks
-    except RuntimeError as e:
-        _info(f"audio.get недоступен ({e}), пробую execute...")
-
-    # Fallback: execute — запускает VKScript на сервере, имеет более широкий доступ
-    try:
-        code = (f"var r=API.audio.get({{'owner_id':{owner_id},'count':200}});"
-                f"return r;")
-        resp = _vk_call("execute", token, code=code)
-        items = resp.get("items", []) if isinstance(resp, dict) else []
-        for item in items:
+        for item in VkAudio(vk_sess).get_iter(owner_id=owner_id):
             tracks.append({
                 'id':     f"{item.get('owner_id')}_{item.get('id')}",
                 'artist': (item.get('artist') or '').strip(),
@@ -17593,14 +17558,10 @@ def _get_vk_tracks(token: str, owner_id: int) -> List[Dict]:
                 'url':    item.get('url') or '',
                 'thumb':  _get_thumb_url(item),
             })
-        if tracks:
-            return tracks
-    except RuntimeError as e:
-        _info(f"execute тоже недоступен ({e})")
-
-    _err("Не удалось получить треки ВК. Токен не имеет доступа к аудио.\n"
-         "Удали config.json и попробуй снова.")
-    sys.exit(1)
+    except Exception as e:
+        _err(f"Ошибка при получении треков: {e}")
+        sys.exit(1)
+    return tracks
 
 
 # =============================================================================
@@ -17730,24 +17691,23 @@ def run(config: dict, dry_run: bool, reset: bool):
     if dry_run:
         print(f"{C.WARN}Режим dry-run: треки не лайкаются и не загружаются{C.R}\n")
 
-    vk_token = vk_cfg.get('token', '').strip()
-    if not vk_token:
-        _err("Нет токена ВК. Удали config.json и запусти заново.")
+    print("Подключаюсь к ВК через браузерную сессию...")
+    vk_sess = _vk_browser_session()
+    if not vk_sess:
+        _err("VK-сессия не найдена в браузере.\n"
+             "Убедись что ты залогинен в vk.com в Chrome и попробуй снова.")
         sys.exit(1)
+    _ok("VK-сессия получена из браузера.")
 
     print("Авторизация в YouTube Music...")
     ytm = _ytm_login(ytm_cfg['auth_file'])
 
     print(f"Определяем страницу '{vk_cfg['target']}'...")
-    try:
-        owner_id = _vk_resolve_id(vk_token, vk_cfg['target'])
-    except RuntimeError as e:
-        _err(str(e))
-        sys.exit(1)
+    owner_id = _vk_resolve_id(vk_sess, vk_cfg['target'])
     _info(f"owner_id = {owner_id}")
 
     print("Загружаем треки из ВК...")
-    tracks = _get_vk_tracks(vk_token, owner_id)
+    tracks = _get_vk_tracks(vk_sess, owner_id)
     total  = len(tracks)
     print(f"Найдено треков: {C.BOLD}{total}{C.R}\n")
 
