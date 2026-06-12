@@ -17498,11 +17498,14 @@ def _vk_browser_session():
         import browser_cookie3
     except ImportError:
         return None
-    for extractor in [browser_cookie3.chrome, browser_cookie3.chromium,
-                      browser_cookie3.firefox, browser_cookie3.brave]:
+    for name, extractor in [('chrome', browser_cookie3.chrome),
+                             ('chromium', browser_cookie3.chromium),
+                             ('firefox', browser_cookie3.firefox),
+                             ('brave', browser_cookie3.brave)]:
         try:
             jar = extractor(domain_name='.vk.com')
             cookies = {c.name: c.value for c in jar}
+            _info(f"browser_cookie3 [{name}]: найдено {len(cookies)} кук VK, remixsid={'remixsid' in cookies}")
             if 'remixsid' in cookies:
                 import requests as req_mod
                 sess = req_mod.Session()
@@ -17511,8 +17514,8 @@ def _vk_browser_session():
                     '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
                 sess.cookies.update(cookies)
                 return sess
-        except Exception:
-            continue
+        except Exception as e:
+            _info(f"browser_cookie3 [{name}]: {e}")
     return None
 
 
