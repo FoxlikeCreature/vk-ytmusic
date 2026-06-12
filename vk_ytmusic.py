@@ -17290,6 +17290,14 @@ import tempfile
 import time
 from difflib import SequenceMatcher
 
+VK_OAUTH_URL = (
+    "https://oauth.vk.com/authorize"
+    "?client_id=2685278"
+    "&scope=audio,offline"
+    "&redirect_uri=https://oauth.vk.com/blank.html"
+    "&display=page"
+    "&response_type=token"
+)
 VK_API_BASE = "https://api.vk.com/method"
 VK_V = "5.131"
 from typing import Dict, List, Optional
@@ -17323,72 +17331,28 @@ def _ask(prompt: str, default: str = '') -> str:
     return val or default
 
 
-def _open_in_browser(url: str):
-    """Открывает URL именно в браузере, а не в просмотрщике изображений."""
-    import subprocess
-    # Пробуем конкретные браузеры напрямую, xdg-open последним
-    # (xdg-open может открыть Gwenview для image URL)
-    browsers = (['start'] if IS_WIN else
-                ['google-chrome-stable', 'google-chrome', 'chromium',
-                 'chromium-browser', 'brave-browser', 'firefox', 'xdg-open'])
-    for cmd in browsers:
-        try:
-            subprocess.Popen([cmd, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return
-        except FileNotFoundError:
-            continue
-    print(f"  Открой вручную: {url}")
-
-
-def _captcha_handler(captcha):
-    import base64, subprocess, tempfile
-    print(f"\n{C.WARN}  ВК просит капчу.{C.R}")
-    url = captcha.get_url()
-    print(f"  URL: {url}")
-
-    # Скачать через сессию vk_api (у неё есть куки)
-    displayed = False
-    try:
-        resp = captcha.vk.http.get(url)
-        data = resp.content
-        print(f"  Content-Type: {resp.headers.get('content-type', '?')}")
-        print(f"  Первые байты: {data[:16].hex()}")
-        is_img = (data[:4] == b'\x89PNG' or data[:3] == b'\xff\xd8\xff'
-                  or data[:6] in (b'GIF87a', b'GIF89a'))
-        if is_img:
-            ext = ('.png' if data[:4] == b'\x89PNG' else
-                   '.gif' if data[:3] == b'GIF' else '.jpg')
-            p = Path(tempfile.gettempdir()) / f'vk_captcha{ext}'
-            p.write_bytes(data)
-            # Открываем локальный файл в Chrome — он умеет показывать картинки
-            subprocess.Popen(['google-chrome-stable', str(p)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print(f"  Открыл {p} в Chrome.")
-            displayed = True
-        else:
-            print(f"  Содержимое не картинка. Пробую открыть URL в браузере...")
-    except Exception as e:
-        print(f"  Не удалось скачать: {e}")
-
-    if not displayed:
-        _open_in_browser(url)
-
-    key = input("  Введи текст с картинки: ").strip()
-    return captcha.try_again(key)
-
-
 def _wizard_config():
     config_path = HERE / 'config.json'
     if config_path.exists():
         return
 
+    import webbrowser
     print(f"\n{C.BOLD}=== Первоначальная настройка ==={C.R}\n")
     print("Конфиг не найден. Сейчас настроим всё вместе.\n")
 
-    print("  1/3  Данные ВКонтакте")
-    print("       Логин — номер телефона или email.\n")
-    vk_login    = _ask("Логин ВК")
-    vk_password = _ask("Пароль ВК")
+    print("  1/3  Авторизация ВКонтакте")
+    print("       Сейчас откроется браузер. Нажми «Разрешить»,")
+    print("       потом вставь сюда адресную строку целиком.\n")
+    try:
+        webbrowser.open(VK_OAUTH_URL)
+        print("  (Браузер открылся)\n")
+    except Exception:
+        print(f"  Открой вручную:\n  {VK_OAUTH_URL}\n")
+    input("  Нажал «Разрешить»? Нажми Enter...")
+    print()
+    vk_token = _ask("Адресная строка").strip()
+    if 'access_token=' in vk_token:
+        vk_token = vk_token.split('access_token=', 1)[1].split('&')[0]
 
     print()
     print("  2/3  Откуда брать музыку")
@@ -17411,9 +17375,8 @@ def _wizard_config():
 
     config = {
         "vk": {
-            "login":    vk_login,
-            "password": vk_password,
-            "target":   vk_target,
+            "token":  vk_token,
+            "target": vk_target,
         },
         "ytmusic": {"auth_file": "browser.json"},
         "options": {
@@ -17552,43 +17515,33 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 
 
 # =============================================================================
-# VK
+# VK API
 # =============================================================================
 
-def _vk_login(vk_cfg: dict):
-    import vk_api as vk_mod
-    login    = vk_cfg.get('login', '')
-    password = vk_cfg.get('password', '')
-    if not login:
-        _err("В config.json нет 'login'. Удали config.json и запусти заново.")
-        sys.exit(1)
-    session = vk_mod.VkApi(login=login, password=password,
-                           captcha_handler=_captcha_handler)
-    try:
-        session.auth()
-    except vk_mod.AuthError as e:
-        _err(f"Не удалось войти в ВК: {e}")
-        sys.exit(1)
-    return session
+def _vk_call(method: str, token: str, **params) -> dict:
+    import requests as req_mod
+    r = req_mod.get(f"{VK_API_BASE}/{method}",
+                    params={"access_token": token, "v": VK_V, **params},
+                    timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    if "error" in data:
+        raise RuntimeError(data["error"].get("error_msg", str(data["error"])))
+    return data["response"]
 
 
-def _resolve_owner_id(session, target: str) -> int:
-    import vk_api as vk_mod
+def _vk_resolve_id(token: str, target: str) -> int:
     try:
         return int(target)
     except ValueError:
         pass
     target = target.lstrip('@').replace('https://vk.com/', '').replace('http://vk.com/', '').rstrip('/')
-    try:
-        result = session.get_api().utils.resolveScreenName(screen_name=target)
-    except vk_mod.ApiError as e:
-        _err(f"Страница '{target}' не найдена: {e}")
+    res = _vk_call("utils.resolveScreenName", token, screen_name=target)
+    if not res:
+        _err(f"Страница '{target}' не найдена.")
         sys.exit(1)
-    if not result:
-        _err(f"Страница '{target}' не найдена. Проверь 'target' в config.json")
-        sys.exit(1)
-    oid = result.get('object_id', 0)
-    return -oid if result.get('type') == 'group' else oid
+    oid = res.get("object_id", 0)
+    return -oid if res.get("type") == "group" else oid
 
 
 def _get_thumb_url(item: dict) -> str:
@@ -17600,11 +17553,39 @@ def _get_thumb_url(item: dict) -> str:
     return ''
 
 
-def _get_vk_tracks(session, owner_id: int) -> List[Dict]:
-    from vk_api.audio import VkAudio
+def _get_vk_tracks(token: str, owner_id: int) -> List[Dict]:
     tracks = []
+
+    # Пробуем audio.get (требует audio scope)
     try:
-        for item in VkAudio(session).get_iter(owner_id=owner_id):
+        offset, count = 0, 200
+        while True:
+            resp = _vk_call("audio.get", token, owner_id=owner_id,
+                            offset=offset, count=count)
+            items = resp.get("items", [])
+            for item in items:
+                tracks.append({
+                    'id':     f"{item.get('owner_id')}_{item.get('id')}",
+                    'artist': (item.get('artist') or '').strip(),
+                    'title':  (item.get('title') or '').strip(),
+                    'url':    item.get('url') or '',
+                    'thumb':  _get_thumb_url(item),
+                })
+            if not items or len(tracks) >= resp.get("count", 0):
+                break
+            offset += count
+        if tracks:
+            return tracks
+    except RuntimeError as e:
+        _info(f"audio.get недоступен ({e}), пробую execute...")
+
+    # Fallback: execute — запускает VKScript на сервере, имеет более широкий доступ
+    try:
+        code = (f"var r=API.audio.get({{'owner_id':{owner_id},'count':200}});"
+                f"return r;")
+        resp = _vk_call("execute", token, code=code)
+        items = resp.get("items", []) if isinstance(resp, dict) else []
+        for item in items:
             tracks.append({
                 'id':     f"{item.get('owner_id')}_{item.get('id')}",
                 'artist': (item.get('artist') or '').strip(),
@@ -17612,10 +17593,14 @@ def _get_vk_tracks(session, owner_id: int) -> List[Dict]:
                 'url':    item.get('url') or '',
                 'thumb':  _get_thumb_url(item),
             })
-    except Exception as e:
-        _err(f"Ошибка при получении треков из ВК: {e}")
-        sys.exit(1)
-    return tracks
+        if tracks:
+            return tracks
+    except RuntimeError as e:
+        _info(f"execute тоже недоступен ({e})")
+
+    _err("Не удалось получить треки ВК. Токен не имеет доступа к аудио.\n"
+         "Удали config.json и попробуй снова.")
+    sys.exit(1)
 
 
 # =============================================================================
@@ -17745,18 +17730,24 @@ def run(config: dict, dry_run: bool, reset: bool):
     if dry_run:
         print(f"{C.WARN}Режим dry-run: треки не лайкаются и не загружаются{C.R}\n")
 
-    print("Авторизация в ВКонтакте...")
-    vk_session = _vk_login(vk_cfg)
+    vk_token = vk_cfg.get('token', '').strip()
+    if not vk_token:
+        _err("Нет токена ВК. Удали config.json и запусти заново.")
+        sys.exit(1)
 
     print("Авторизация в YouTube Music...")
     ytm = _ytm_login(ytm_cfg['auth_file'])
 
-    print(f"Ищем страницу '{vk_cfg['target']}'...")
-    owner_id = _resolve_owner_id(vk_session, vk_cfg['target'])
+    print(f"Определяем страницу '{vk_cfg['target']}'...")
+    try:
+        owner_id = _vk_resolve_id(vk_token, vk_cfg['target'])
+    except RuntimeError as e:
+        _err(str(e))
+        sys.exit(1)
     _info(f"owner_id = {owner_id}")
 
     print("Загружаем треки из ВК...")
-    tracks = _get_vk_tracks(vk_session, owner_id)
+    tracks = _get_vk_tracks(vk_token, owner_id)
     total  = len(tracks)
     print(f"Найдено треков: {C.BOLD}{total}{C.R}\n")
 
