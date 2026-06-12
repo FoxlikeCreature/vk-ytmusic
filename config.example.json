@@ -1,0 +1,15 @@
+{
+  "vk": {
+    "login": "79001234567",
+    "password": "your_vk_password",
+    "target": "durov"
+  },
+  "ytmusic": {
+    "auth_file": "oauth.json"
+  },
+  "options": {
+    "match_threshold": 0.65,
+    "temp_dir": null,
+    "resume_file": "progress.json"
+  }
+}

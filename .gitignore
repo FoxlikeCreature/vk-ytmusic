@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+config.json
+oauth.json
+progress.json
+*.mp3
+*.m4a
