@@ -17290,14 +17290,8 @@ import tempfile
 import time
 from difflib import SequenceMatcher
 
-VK_OAUTH_URL = (
-    "https://oauth.vk.com/authorize"
-    "?client_id=2274003"
-    "&scope=audio,offline"
-    "&redirect_uri=https://oauth.vk.com/blank.html"
-    "&display=page"
-    "&response_type=token"
-)
+VK_CLIENT_ID     = "2274003"
+VK_CLIENT_SECRET = "hHbZxrka2uZ6jB1inYsH"
 VK_API_BASE = "https://api.vk.com/method"
 VK_V = "5.131"
 from typing import Dict, List, Optional
@@ -17331,31 +17325,83 @@ def _ask(prompt: str, default: str = '') -> str:
     return val or default
 
 
+def _vk_auth(login: str, password: str,
+             captcha_sid: str = '', captcha_key: str = '') -> str:
+    """Получает VK access_token через прямой API (не browser OAuth)."""
+    import requests as req_mod, webbrowser
+    params = {
+        'grant_type':    'password',
+        'username':      login,
+        'password':      password,
+        'client_id':     VK_CLIENT_ID,
+        'client_secret': VK_CLIENT_SECRET,
+        'scope':         'audio,offline',
+        '2fa_supported': '1',
+        'v':             VK_V,
+    }
+    if captcha_sid:
+        params['captcha_sid'] = captcha_sid
+        params['captcha_key'] = captcha_key
+
+    r = req_mod.post('https://oauth.vk.com/token', data=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    if 'access_token' in data:
+        return data['access_token']
+
+    error = data.get('error', '')
+
+    if error == 'need_captcha':
+        captcha_img = data.get('captcha_img', '')
+        print(f"\n  ВК просит капчу.")
+        try:
+            webbrowser.open(captcha_img)
+            print("  Картинка открылась в браузере.")
+        except Exception:
+            print(f"  Открой в браузере: {captcha_img}")
+        key = input("  Введи текст с картинки: ").strip()
+        return _vk_auth(login, password, data['captcha_sid'], key)
+
+    if error == 'need_validation':
+        redirect_uri = data.get('redirect_uri', '')
+        print(f"\n  ВК требует подтверждение (SMS или 2FA).")
+        try:
+            webbrowser.open(redirect_uri)
+        except Exception:
+            print(f"  Открой в браузере: {redirect_uri}")
+        code = input("  Введи код: ").strip()
+        params['code'] = code
+        r2 = req_mod.post('https://oauth.vk.com/token', data=params, timeout=30)
+        data2 = r2.json()
+        if 'access_token' in data2:
+            return data2['access_token']
+        raise RuntimeError(f"Ошибка авторизации ВК: {data2.get('error_description', data2)}")
+
+    raise RuntimeError(f"Ошибка авторизации ВК: {data.get('error_description', error)}")
+
+
 def _wizard_config():
     config_path = HERE / 'config.json'
     if config_path.exists():
         return
 
-    import webbrowser
     print(f"\n{C.BOLD}=== Первоначальная настройка ==={C.R}\n")
     print("Конфиг не найден. Сейчас настроим всё вместе.\n")
 
-    # --- 1/3: VK token via browser OAuth ---
-    print(f"  1/3  Токен ВКонтакте")
-    print(f"       Сейчас откроется страница ВК. Нажми там «Разрешить»,")
-    print(f"       затем из адресной строки скопируй токен.\n")
+    # --- 1/3: VK credentials ---
+    print(f"  1/3  Данные ВКонтакте")
+    print(f"       Логин — номер телефона или email.\n")
+    vk_login    = _ask("Логин ВК")
+    vk_password = _ask("Пароль ВК")
+
+    print(f"\n  Получаю токен...")
     try:
-        webbrowser.open(VK_OAUTH_URL)
-        print("  (Страница открылась в браузере)\n")
-    except Exception:
-        print(f"  Открой вручную:\n  {C.BOLD}{VK_OAUTH_URL}{C.R}\n")
-    input("  Нажал «Разрешить»? Нажми Enter...")
-    print()
-    print(f"  Теперь скопируй адресную строку браузера целиком и вставь сюда.\n")
-    vk_token = _ask("Ссылка или токен").strip()
-    # Вытащить access_token из URL вида ...blank.html#access_token=vk1.a...&expires_in=...
-    if 'access_token=' in vk_token:
-        vk_token = vk_token.split('access_token=', 1)[1].split('&')[0]
+        vk_token = _vk_auth(vk_login, vk_password)
+    except RuntimeError as e:
+        _err(str(e))
+        sys.exit(1)
+    _ok("ВК авторизован!")
 
     # --- 2/3: target page ---
     print()
