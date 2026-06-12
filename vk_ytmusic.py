@@ -17492,31 +17492,87 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 # VK (через куки браузера — не нужен логин или OAuth)
 # =============================================================================
 
-def _vk_browser_session():
-    """Берёт VK-сессию из браузера пользователя через browser_cookie3."""
+def _read_chrome_vk_cookies() -> dict:
+    """Читает VK-куки из Chrome напрямую через sqlite3 + openssl."""
+    import sqlite3, shutil, subprocess, hashlib
+    cookie_paths = [
+        Path.home() / '.config/google-chrome/Default/Cookies',
+        Path.home() / '.config/google-chrome-stable/Default/Cookies',
+        Path.home() / '.config/chromium/Default/Cookies',
+    ]
+    cookie_file = next((p for p in cookie_paths if p.exists()), None)
+    if not cookie_file:
+        return {}
+
+    tmp = Path(tempfile.gettempdir()) / 'vk_chrome_cookies_tmp.db'
     try:
-        import browser_cookie3
-    except ImportError:
-        return None
-    for name, extractor in [('chrome', browser_cookie3.chrome),
-                             ('chromium', browser_cookie3.chromium),
-                             ('firefox', browser_cookie3.firefox),
-                             ('brave', browser_cookie3.brave)]:
+        shutil.copy2(cookie_file, tmp)
+    except Exception as e:
+        _info(f"Не удалось скопировать cookie DB: {e}")
+        return {}
+
+    # Получаем ключ шифрования Chrome из системного keyring
+    password = 'peanuts'  # дефолт когда keyring недоступен
+    for lookup in [['secret-tool', 'lookup', 'application', 'chrome'],
+                   ['secret-tool', 'lookup', 'application', 'chromium']]:
         try:
-            jar = extractor(domain_name='.vk.com')
-            cookies = {c.name: c.value for c in jar}
-            _info(f"browser_cookie3 [{name}]: найдено {len(cookies)} кук VK, remixsid={'remixsid' in cookies}")
-            if 'remixsid' in cookies:
-                import requests as req_mod
-                sess = req_mod.Session()
-                sess.headers['User-Agent'] = (
-                    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-                    '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-                sess.cookies.update(cookies)
-                return sess
-        except Exception as e:
-            _info(f"browser_cookie3 [{name}]: {e}")
-    return None
+            r = subprocess.run(lookup, capture_output=True, timeout=5)
+            p = r.stdout.decode().strip()
+            if p:
+                password = p
+                break
+        except Exception:
+            pass
+
+    key = hashlib.pbkdf2_hmac('sha1', password.encode(), b'saltysalt', 1, 16)
+    iv  = b' ' * 16
+
+    cookies: dict = {}
+    try:
+        conn = sqlite3.connect(str(tmp))
+        rows = conn.execute(
+            "SELECT name, value, encrypted_value FROM cookies "
+            "WHERE host_key LIKE '%vk.com%'"
+        ).fetchall()
+        conn.close()
+        for name, value, enc in rows:
+            if value:
+                cookies[name] = value
+            elif enc and enc[:3] in (b'v10', b'v11'):
+                try:
+                    r = subprocess.run(
+                        ['openssl', 'enc', '-d', '-aes-128-cbc',
+                         '-K', key.hex(), '-iv', iv.hex(), '-nosalt'],
+                        input=enc[3:], capture_output=True, timeout=5)
+                    raw = r.stdout
+                    if raw:
+                        pad = raw[-1]
+                        if 1 <= pad <= 16:
+                            raw = raw[:-pad]
+                        cookies[name] = raw.decode('utf-8', errors='ignore')
+                except Exception:
+                    pass
+    except Exception as e:
+        _info(f"Chrome DB: {e}")
+    finally:
+        try:
+            tmp.unlink()
+        except Exception:
+            pass
+    return cookies
+
+
+def _vk_browser_session():
+    cookies = _read_chrome_vk_cookies()
+    if 'remixsid' not in cookies:
+        return None
+    import requests as req_mod
+    sess = req_mod.Session()
+    sess.headers['User-Agent'] = (
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    sess.cookies.update(cookies)
+    return sess
 
 
 def _vk_resolve_id(sess, target: str) -> int:
