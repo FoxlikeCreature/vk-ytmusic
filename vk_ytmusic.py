@@ -17602,6 +17602,8 @@ def _vk_resolve_id(sess, target: str) -> int:
     try:
         r = sess.get(f"https://vk.com/{target}", timeout=30,
                      allow_redirects=True)
+        _info(f"URL после редиректа: {r.url}")
+        _info(f"Первые 300 символов: {r.text[:300]!r}")
         # /id123456 redirect
         if '/id' in r.url:
             m = re.search(r'/id(\d+)', r.url)
