@@ -17427,17 +17427,24 @@ def _try_auto_cookie_extract() -> Optional[str]:
     return None
 
 
+def _sapisidhash(sapisid: str) -> str:
+    import hashlib, time as _t
+    ts = int(_t.time())
+    h = hashlib.sha1(f"{ts} {sapisid} https://music.youtube.com".encode()).hexdigest()
+    return f"SAPISIDHASH {ts}_{h}"
+
+
 def _save_ytm_auth(auth_path: Path, cookie_str: str):
-    """Создаёт browser.json для ytmusicapi из строки куки."""
-    from ytmusicapi import YTMusic
-    headers_raw = f"cookie: {cookie_str}\nx-goog-authuser: 0\n"
-    try:
-        YTMusic.setup(filepath=str(auth_path), headers_raw=headers_raw)
-        return
-    except Exception:
-        pass
-    # Fallback: сохранить напрямую в нужном формате
-    auth_path.write_text(json.dumps({
+    # Извлекаем SAPISID для вычисления Authorization: SAPISIDHASH
+    # ytmusicapi определяет тип авторизации по этому заголовку
+    sapisid = ''
+    for part in cookie_str.split(';'):
+        k, _, v = part.strip().partition('=')
+        if k.strip() in ('SAPISID', '__Secure-3PAPISID'):
+            sapisid = v.strip()
+            break
+
+    headers: dict = {
         "accept": "*/*",
         "accept-encoding": "gzip, deflate",
         "accept-language": "en-US,en;q=0.9",
@@ -17447,7 +17454,10 @@ def _save_ytm_auth(auth_path: Path, cookie_str: str):
         "x-goog-authuser": "0",
         "x-youtube-client-name": "67",
         "x-youtube-client-version": "1.20240101.00.00",
-    }, indent=2), encoding='utf-8')
+    }
+    if sapisid:
+        headers["authorization"] = _sapisidhash(sapisid)
+    auth_path.write_text(json.dumps(headers, indent=2), encoding='utf-8')
 
 
 def _wizard_ytmusic_auth(auth_file: str):
