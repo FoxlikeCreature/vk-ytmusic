@@ -71,14 +71,14 @@ def _bootstrap():
         print("Создаю виртуальное окружение (с доступом к системным пакетам)...")
         _run(sys.executable, '-m', 'venv', '--system-site-packages', str(VENV_DIR))
         print()
-        print("Доустанавливаю vk_api...")
-        _run(str(VENV_PIP), 'install', '--quiet', 'vk_api')
+        print("Доустанавливаю vk_api и browser_cookie3...")
+        _run(str(VENV_PIP), 'install', '--quiet', 'vk_api', 'browser_cookie3')
     else:
         print("Создаю виртуальное окружение...")
         _run(sys.executable, '-m', 'venv', str(VENV_DIR))
         print()
         print("Устанавливаю зависимости...")
-        pkgs = ['vk_api', 'ytmusicapi', 'mutagen', 'requests', 'tqdm']
+        pkgs = ['vk_api', 'ytmusicapi', 'mutagen', 'requests', 'tqdm', 'browser_cookie3']
         _run(str(VENV_PIP), 'install', '--quiet', *pkgs)
 
     VENV_MARKER.touch()
@@ -183,45 +183,98 @@ def _wizard_config():
     _ok(f"Конфиг сохранён: {config_path.name}")
 
 
+def _try_auto_cookie_extract() -> Optional[str]:
+    """Пробует автоматически достать куки YouTube из установленных браузеров."""
+    try:
+        import browser_cookie3
+    except ImportError:
+        return None
+
+    extractors = [
+        ('Chrome',    browser_cookie3.chrome),
+        ('Chromium',  browser_cookie3.chromium),
+        ('Firefox',   browser_cookie3.firefox),
+        ('Brave',     browser_cookie3.brave),
+        ('Edge',      browser_cookie3.edge),
+        ('Opera',     browser_cookie3.opera),
+        ('Vivaldi',   browser_cookie3.vivaldi),
+    ]
+
+    for name, extractor in extractors:
+        try:
+            jar = extractor(domain_name='.youtube.com')
+            cookies = {c.name: c.value for c in jar}
+            if 'SAPISID' in cookies:
+                _ok(f"Куки найдены в {name}")
+                return '; '.join(f'{k}={v}' for k, v in cookies.items())
+        except Exception:
+            continue
+
+    return None
+
+
+def _save_ytm_auth(auth_path: Path, cookie_str: str):
+    """Создаёт browser.json для ytmusicapi из строки куки."""
+    from ytmusicapi import YTMusic
+    headers_raw = f"cookie: {cookie_str}\nx-goog-authuser: 0\n"
+    try:
+        YTMusic.setup(filepath=str(auth_path), headers_raw=headers_raw)
+        return
+    except Exception:
+        pass
+    # Fallback: сохранить напрямую в нужном формате
+    auth_path.write_text(json.dumps({
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "accept-language": "en-US,en;q=0.9",
+        "content-type": "application/json",
+        "cookie": cookie_str,
+        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "x-goog-authuser": "0",
+        "x-youtube-client-name": "67",
+        "x-youtube-client-version": "1.20240101.00.00",
+    }, indent=2), encoding='utf-8')
+
+
 def _wizard_ytmusic_auth(auth_file: str):
-    """Авторизация YouTube Music через browser-метод (cookie из Chrome)."""
+    """Авторизация YouTube Music: сначала авто, потом 1 команда в браузере."""
     auth_path = HERE / auth_file
     if auth_path.exists():
         return
 
     print(f"\n{C.BOLD}=== Авторизация YouTube Music ==={C.R}\n")
-    print("  Скрипт войдёт в твой аккаунт YouTube Music через Chrome.\n")
-    print(f"  {C.BOLD}Что нужно сделать:{C.R}\n")
-    print("  1. Открой Chrome и перейди на  https://music.youtube.com")
-    print("     Убедись что ты залогинен в нужный Google аккаунт.\n")
-    print("  2. Нажми F12  (откроются DevTools)\n")
-    print("  3. Перейди на вкладку  Network\n")
-    print("  4. Нажми F5 чтобы перезагрузить страницу\n")
-    print("  5. В списке запросов найди любой с адресом  music.youtube.com")
-    print("     (например 'browse' или 'config')\n")
-    print("  6. Кликни по нему, в правой панели выбери вкладку  Headers\n")
-    print("  7. Прокрути вниз до раздела  Request Headers\n")
-    print("  8. Нажми правой кнопкой на любой заголовок ->")
-    print(f"     {C.BOLD}Copy all as cURL{C.R}  (или 'Copy value' для cookie)\n")
-    print("  После этого вернись сюда и вставь скопированное.\n")
-    print(f"  {C.DIM}Подсказка: если не видишь запросов -- обнови страницу{C.R}\n")
-    input("  Нажми Enter когда будешь готов...")
+    print("  Пробую получить куки автоматически из браузера...")
 
-    ytm_bin = (shutil.which('ytmusicapi', path=str(VENV_DIR / ('Scripts' if IS_WIN else 'bin')))
-               or shutil.which('ytmusicapi'))
+    cookie_str = _try_auto_cookie_extract()
+    if cookie_str:
+        _save_ytm_auth(auth_path, cookie_str)
+        _ok("YouTube Music авторизован автоматически!")
+        return
 
-    if not ytm_bin:
-        _err("ytmusicapi не найден.")
+    # Ручной метод: одна команда в консоли браузера
+    _warn("Автоматически не вышло (возможно браузер закрыт или куки недоступны).\n")
+    print("  Нужно выполнить одну команду в браузере. Это займёт минуту.\n")
+    print(f"  1. Открой любой браузер, перейди на  {C.BOLD}music.youtube.com{C.R}")
+    print(f"     Убедись что ты залогинен в нужный Google аккаунт.\n")
+    print(f"  2. Нажми  {C.BOLD}F12{C.R}  -- откроется панель разработчика.\n")
+    print(f"  3. Перейди на вкладку  {C.BOLD}Console{C.R}  (Консоль).\n")
+    print(f"  4. Вставь туда эту команду и нажми Enter:\n")
+    print(f"       {C.BOLD}copy(document.cookie){C.R}\n")
+    print(f"     {C.DIM}Ничего не отобразится -- это нормально.")
+    print(f"     Куки уже скопированы в буфер обмена.{C.R}\n")
+    input("  Выполнил? Нажми Enter...")
+    print(f"  Теперь вставь сюда (Ctrl+V) и нажми Enter:")
+    cookie_str = input("  > ").strip()
+
+    if len(cookie_str) < 20:
+        _err("Строка слишком короткая. Убедись что выполнил команду на music.youtube.com")
         sys.exit(1)
 
-    print()
-    result = subprocess.run([ytm_bin, 'browser', '--file', str(auth_path)])
-    if result.returncode != 0 or not auth_path.exists():
-        _err("Авторизация не прошла.")
-        _err(f"Попробуй вручную: ytmusicapi browser --file {auth_path}")
-        sys.exit(1)
+    if 'SAPISID' not in cookie_str and 'VISITOR_INFO' not in cookie_str:
+        _warn("Не найдены ожидаемые куки YouTube. Продолжаю, но авторизация может не работать.")
 
-    _ok("YouTube Music авторизован")
+    _save_ytm_auth(auth_path, cookie_str)
+    _ok("YouTube Music авторизован!")
 
 
 # =============================================================================
