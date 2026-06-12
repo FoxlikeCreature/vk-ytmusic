@@ -17329,7 +17329,8 @@ def _open_in_browser(url: str):
     # Пробуем конкретные браузеры напрямую, xdg-open последним
     # (xdg-open может открыть Gwenview для image URL)
     browsers = (['start'] if IS_WIN else
-                ['google-chrome', 'chromium', 'chromium-browser', 'firefox', 'xdg-open'])
+                ['google-chrome-stable', 'google-chrome', 'chromium',
+                 'chromium-browser', 'brave-browser', 'firefox', 'xdg-open'])
     for cmd in browsers:
         try:
             subprocess.Popen([cmd, url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
