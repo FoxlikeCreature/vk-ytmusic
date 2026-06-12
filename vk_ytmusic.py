@@ -17586,14 +17586,39 @@ def _vk_resolve_id(sess, target: str) -> int:
     except ValueError:
         pass
     target = target.lstrip('@').replace('https://vk.com/', '').replace('http://vk.com/', '').rstrip('/')
-    r = sess.get(f"{VK_API_BASE}/utils.resolveScreenName",
-                 params={"screen_name": target, "v": VK_V}, timeout=30)
-    res = r.json().get("response", {})
-    if not res:
-        _err(f"Страница '{target}' не найдена.")
-        sys.exit(1)
-    oid = res.get("object_id", 0)
-    return -oid if res.get("type") == "group" else oid
+
+    # Пробуем API (работает без токена для некоторых запросов)
+    try:
+        r = sess.get(f"{VK_API_BASE}/utils.resolveScreenName",
+                     params={"screen_name": target, "v": VK_V}, timeout=30)
+        res = r.json().get("response") or {}
+        if res and res.get("object_id"):
+            oid = res["object_id"]
+            return -oid if res.get("type") == "group" else oid
+    except Exception:
+        pass
+
+    # Fallback: парсим страницу профиля
+    try:
+        r = sess.get(f"https://vk.com/{target}", timeout=30,
+                     allow_redirects=True)
+        # /id123456 redirect
+        if '/id' in r.url:
+            m = re.search(r'/id(\d+)', r.url)
+            if m:
+                return int(m.group(1))
+        # owner_id в HTML
+        for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
+                        r'"id"\s*:\s*(\d+)',
+                        r'page_owner_id["\s:]+(-?\d+)'):
+            m = re.search(pattern, r.text)
+            if m:
+                return int(m.group(1))
+    except Exception as e:
+        _info(f"Не удалось спарсить страницу: {e}")
+
+    _err(f"Страница '{target}' не найдена. Проверь 'target' в config.json")
+    sys.exit(1)
 
 
 def _get_thumb_url(item: dict) -> str:
