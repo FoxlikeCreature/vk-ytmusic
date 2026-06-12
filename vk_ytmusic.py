@@ -17292,7 +17292,7 @@ from difflib import SequenceMatcher
 
 VK_OAUTH_URL = (
     "https://oauth.vk.com/authorize"
-    "?client_id=2685278"
+    "?client_id=2274003"
     "&scope=audio,offline"
     "&redirect_uri=https://oauth.vk.com/blank.html"
     "&display=page"
