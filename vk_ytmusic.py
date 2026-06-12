@@ -17585,15 +17585,7 @@ def _ytm_login(auth_file: str):
     if not path.exists():
         _err(f"Файл авторизации не найден: {path}")
         sys.exit(1)
-    try:
-        return YTMusic(str(path))
-    except Exception as e:
-        if 'oauth' in str(e).lower():
-            _warn("Файл авторизации YouTube Music устарел (формат OAuth). Пересоздаю...")
-            path.unlink()
-            _wizard_ytmusic_auth(auth_file)
-            return YTMusic(str(path))
-        raise
+    return YTMusic(str(path))
 
 
 def _search_ytmusic(ytm, artist: str, title: str, threshold: float) -> Optional[Dict]:
