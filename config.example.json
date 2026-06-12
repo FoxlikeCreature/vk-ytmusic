@@ -5,7 +5,7 @@
     "target": "durov"
   },
   "ytmusic": {
-    "auth_file": "oauth.json"
+    "auth_file": "browser.json"
   },
   "options": {
     "match_threshold": 0.65,

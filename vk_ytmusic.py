@@ -171,7 +171,7 @@ def _wizard_config():
             "target":   vk_target,
         },
         "ytmusic": {
-            "auth_file": "oauth.json",
+            "auth_file": "browser.json",
         },
         "options": {
             "match_threshold": threshold,
@@ -184,32 +184,41 @@ def _wizard_config():
 
 
 def _wizard_ytmusic_auth(auth_file: str):
-    """OAuth YouTube Music если oauth.json ещё нет."""
-    oauth_path = HERE / auth_file
-    if oauth_path.exists():
+    """Авторизация YouTube Music через browser-метод (cookie из Chrome)."""
+    auth_path = HERE / auth_file
+    if auth_path.exists():
         return
 
     print(f"\n{C.BOLD}=== Авторизация YouTube Music ==={C.R}\n")
-    print("  Нужно войти в Google аккаунт чтобы скрипт мог")
-    print("  лайкать треки и загружать музыку.\n")
-    print("  Что произойдёт:")
-    print("    1. В терминале появится ссылка")
-    print("    2. Открой её в браузере")
-    print("    3. Войди в Google аккаунт")
-    print("    4. Скопируй код обратно сюда\n")
-    input("  Нажми Enter чтобы начать...")
+    print("  Скрипт войдёт в твой аккаунт YouTube Music через Chrome.\n")
+    print(f"  {C.BOLD}Что нужно сделать:{C.R}\n")
+    print("  1. Открой Chrome и перейди на  https://music.youtube.com")
+    print("     Убедись что ты залогинен в нужный Google аккаунт.\n")
+    print("  2. Нажми F12  (откроются DevTools)\n")
+    print("  3. Перейди на вкладку  Network\n")
+    print("  4. Нажми F5 чтобы перезагрузить страницу\n")
+    print("  5. В списке запросов найди любой с адресом  music.youtube.com")
+    print("     (например 'browse' или 'config')\n")
+    print("  6. Кликни по нему, в правой панели выбери вкладку  Headers\n")
+    print("  7. Прокрути вниз до раздела  Request Headers\n")
+    print("  8. Нажми правой кнопкой на любой заголовок ->")
+    print(f"     {C.BOLD}Copy all as cURL{C.R}  (или 'Copy value' для cookie)\n")
+    print("  После этого вернись сюда и вставь скопированное.\n")
+    print(f"  {C.DIM}Подсказка: если не видишь запросов -- обнови страницу{C.R}\n")
+    input("  Нажми Enter когда будешь готов...")
 
     ytm_bin = (shutil.which('ytmusicapi', path=str(VENV_DIR / ('Scripts' if IS_WIN else 'bin')))
                or shutil.which('ytmusicapi'))
 
     if not ytm_bin:
-        _err("Бинарник ytmusicapi не найден. Попробуй запустить setup заново.")
+        _err("ytmusicapi не найден.")
         sys.exit(1)
 
-    result = subprocess.run([ytm_bin, 'oauth', '--file', str(oauth_path)])
-    if result.returncode != 0 or not oauth_path.exists():
-        _err("Авторизация не прошла. Попробуй вручную:")
-        _err(f"  ytmusicapi oauth {oauth_path}")
+    print()
+    result = subprocess.run([ytm_bin, 'browser', '--file', str(auth_path)])
+    if result.returncode != 0 or not auth_path.exists():
+        _err("Авторизация не прошла.")
+        _err(f"Попробуй вручную: ytmusicapi browser --file {auth_path}")
         sys.exit(1)
 
     _ok("YouTube Music авторизован")
