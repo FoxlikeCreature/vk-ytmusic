@@ -17902,30 +17902,34 @@ def run(config: dict, dry_run: bool, reset: bool):
                     stats['errors'] += 1
                     continue
 
-                audio = _download(track['url'])
-                if not audio:
-                    retry_queue.append(track)
-                    continue
-
-                safe   = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', label)[:100]
-                mp3    = tmp_root / f"{safe}.mp3"
-                mp3.write_bytes(audio)
-
-                thumb_data = _download(track['thumb']) if track['thumb'] else None
-                _tag(mp3, track['artist'], track['title'], thumb_data)
-
-                if _upload(ytm, mp3, dry_run):
-                    tprint(f"{C.UP}  ^{C.R}  Загружен из ВК: {label}")
+                if dry_run:
+                    tprint(f"{C.UP}  ^{C.R}  [dry-run] Загрузил бы из ВК: {label}")
                     stats['uploaded'] += 1
-                    time.sleep(1)
                 else:
-                    stats['errors'] += 1
-                    continue
+                    audio = _download(track['url'])
+                    if not audio:
+                        retry_queue.append(track)
+                        continue
 
-                try:
-                    mp3.unlink()
-                except Exception:
-                    pass
+                    safe   = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', label)[:100]
+                    mp3    = tmp_root / f"{safe}.mp3"
+                    mp3.write_bytes(audio)
+
+                    thumb_data = _download(track['thumb']) if track['thumb'] else None
+                    _tag(mp3, track['artist'], track['title'], thumb_data)
+
+                    if _upload(ytm, mp3, dry_run):
+                        tprint(f"{C.UP}  ^{C.R}  Загружен из ВК: {label}")
+                        stats['uploaded'] += 1
+                        time.sleep(1)
+                    else:
+                        stats['errors'] += 1
+                        continue
+
+                    try:
+                        mp3.unlink()
+                    except Exception:
+                        pass
 
         except Exception as e:
             tprint(f"{C.ERR}  !{C.R}  Ошибка '{label}': {e}")
