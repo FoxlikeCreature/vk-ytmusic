@@ -17674,15 +17674,15 @@ def _get_vk_tracks(sess, owner_id: int):
         _err(f"Не удалось получить список треков: {e}")
         sys.exit(1)
 
-    audio = object.__new__(VkAudio)
-    audio._vk = vk_sess
-    audio.user_id = user_id
-    audio.convert_m3u8_links = True
+    vk_audio = object.__new__(VkAudio)
+    vk_audio._vk = vk_sess
+    vk_audio.user_id = user_id
+    vk_audio.convert_m3u8_links = True
     set_cookies_from_list(vk_sess.http.cookies, VkAudio.DEFAULT_COOKIES)
 
     def _gen():
         try:
-            for item in audio.get_iter(owner_id=owner_id):
+            for item in vk_audio.get_iter(owner_id=owner_id):
                 yield {
                     'id':     f"{item.get('owner_id')}_{item.get('id')}",
                     'artist': (item.get('artist') or '').strip(),
@@ -17694,7 +17694,7 @@ def _get_vk_tracks(sess, owner_id: int):
             _err(f"Ошибка при получении треков: {e}")
             sys.exit(1)
 
-    return total, _gen()
+    return total, _gen(), vk_audio
 
 
 # =============================================================================
@@ -17755,15 +17755,19 @@ def _upload(ytm, mp3_path: Path, dry_run: bool) -> bool:
 # Загрузка из ВК
 # =============================================================================
 
-def _download(url: str) -> Optional[bytes]:
+def _download(url: str, retries: int = 3) -> Optional[bytes]:
     import requests as req
-    try:
-        r = req.get(url, stream=True, timeout=30)
-        r.raise_for_status()
-        return b''.join(r.iter_content(65536))
-    except Exception as e:
-        _warn(f"Ошибка скачивания: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            r = req.get(url, stream=True, timeout=30)
+            r.raise_for_status()
+            return b''.join(r.iter_content(65536))
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(5 * (attempt + 1))
+            else:
+                _warn(f"Ошибка скачивания: {e}")
+    return None
 
 
 def _tag(path: Path, artist: str, title: str, thumb: Optional[bytes]):
@@ -17839,7 +17843,7 @@ def run(config: dict, dry_run: bool, reset: bool):
     owner_id = _vk_resolve_id(vk_sess, vk_cfg['target'])
 
     print("Подключаюсь к ВК, считаю треки...")
-    total, track_gen = _get_vk_tracks(vk_sess, owner_id)
+    total, track_gen, vk_audio = _get_vk_tracks(vk_sess, owner_id)
     print(f"Найдено треков: {C.BOLD}{total}{C.R}\n")
 
     stats = {'found': 0, 'uploaded': 0, 'skipped': 0, 'errors': 0}
@@ -17853,6 +17857,7 @@ def run(config: dict, dry_run: bool, reset: bool):
         pbar     = track_gen
         tprint   = print
 
+    retry_queue: list = []
     i = 0
     for track in pbar:
         track_id = track['id']
@@ -17899,7 +17904,7 @@ def run(config: dict, dry_run: bool, reset: bool):
 
                 audio = _download(track['url'])
                 if not audio:
-                    stats['errors'] += 1
+                    retry_queue.append(track)
                     continue
 
                 safe   = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', label)[:100]
@@ -17929,6 +17934,43 @@ def run(config: dict, dry_run: bool, reset: bool):
 
         done_ids.add(track_id)
         _save_progress(resume_path, done_ids)
+
+    # Повторная попытка для треков с ошибками скачивания (переопрашиваем URL)
+    if retry_queue:
+        print(f"\nПовторная попытка для {len(retry_queue)} треков...")
+        for track in retry_queue:
+            label = f"{track['artist']} - {track['title']}"
+            try:
+                parts = track['id'].split('_', 1)
+                fresh = vk_audio.get_audio_by_id(int(parts[0]), int(parts[1]))
+                url   = fresh.get('url', '') if fresh else ''
+            except Exception:
+                url = track['url']
+            if not url:
+                _warn(f"Нет URL при ретрае: {label}")
+                stats['errors'] += 1
+                continue
+            audio_data = _download(url)
+            if not audio_data:
+                _warn(f"Ретрай не помог: {label}")
+                stats['errors'] += 1
+                continue
+            safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', label)[:100]
+            mp3  = tmp_root / f"{safe}.mp3"
+            mp3.write_bytes(audio_data)
+            thumb_data = _download(track['thumb']) if track['thumb'] else None
+            _tag(mp3, track['artist'], track['title'], thumb_data)
+            if _upload(ytm, mp3, dry_run):
+                _up(f"Загружен (ретрай): {label}")
+                stats['uploaded'] += 1
+                done_ids.add(track['id'])
+                _save_progress(resume_path, done_ids)
+            else:
+                stats['errors'] += 1
+            try:
+                mp3.unlink()
+            except Exception:
+                pass
 
     print(f"\n{C.BOLD}{'=' * 40}{C.R}")
     if dry_run:
