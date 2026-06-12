@@ -17571,9 +17571,17 @@ def _vk_browser_session():
     sess.headers['User-Agent'] = (
         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
         '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    # Отправляем только нужные куки с безопасными значениями
+    important = ('remixsid', 'remixsts', 'remixsf', 'remixdt',
+                 'remixlang', 'remixua', 'p', 'l', 'domain_sid')
     for k, v in cookies.items():
+        if k not in important:
+            continue
         try:
-            v.encode('latin-1')  # HTTP-заголовки принимают только latin-1
+            v.encode('latin-1')
+            # Куки не должны содержать ; , " пробел
+            if any(c in v for c in '",; \t\n\r'):
+                continue
             sess.cookies.set(k, v, domain='.vk.com')
         except (UnicodeEncodeError, UnicodeDecodeError):
             pass
