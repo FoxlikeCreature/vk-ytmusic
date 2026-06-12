@@ -1,5 +1,0 @@
-vk_api>=11.9.9
-ytmusicapi>=1.7.0
-mutagen>=1.47.0
-requests>=2.31.0
-tqdm>=4.66.0
