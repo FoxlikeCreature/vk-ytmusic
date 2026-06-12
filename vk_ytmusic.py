@@ -17494,8 +17494,23 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 # =============================================================================
 
 def _captcha_handler(captcha):
+    import tempfile, subprocess, urllib.request
+
     print(f"\n{C.WARN}  ВК просит ввести капчу.{C.R}")
-    print(f"  Открой в браузере: {C.BOLD}{captcha.get_url()}{C.R}")
+
+    # Скачиваем картинку и открываем локально
+    try:
+        img_path = Path(tempfile.gettempdir()) / 'vk_captcha.jpg'
+        urllib.request.urlretrieve(captcha.get_url(), img_path)
+        if IS_WIN:
+            os.startfile(img_path)
+        else:
+            subprocess.Popen(['xdg-open', str(img_path)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"  Картинка открылась в просмотрщике.")
+    except Exception:
+        print(f"  Не удалось открыть картинку. URL: {captcha.get_url()}")
+
     key = input("  Введи текст с картинки: ").strip()
     return captcha.try_again(key)
 
