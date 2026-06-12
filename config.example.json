@@ -1,7 +1,6 @@
 {
   "vk": {
-    "login": "79001234567",
-    "password": "your_vk_password",
+    "token": "vk1.a.YOUR_TOKEN_HERE",
     "target": "durov"
   },
   "ytmusic": {
