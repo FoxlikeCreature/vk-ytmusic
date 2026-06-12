@@ -20,7 +20,14 @@ IS_ARCH = Path('/etc/arch-release').exists()
 VENV_DIR    = HERE / '.venv'
 VENV_PY     = VENV_DIR / ('Scripts' if IS_WIN else 'bin') / ('python.exe' if IS_WIN else 'python')
 VENV_PIP    = VENV_DIR / ('Scripts' if IS_WIN else 'bin') / ('pip.exe' if IS_WIN else 'pip')
-VENV_MARKER = VENV_DIR / '.ready'
+VENV_MARKER = VENV_DIR / '.packages'  # хранит список установленных пакетов
+
+# Пакеты которые ставятся через pip в venv
+ARCH_PIP  = ['vk_api', 'browser_cookie3']
+ALL_PIP   = ['vk_api', 'ytmusicapi', 'mutagen', 'requests', 'tqdm', 'browser_cookie3']
+
+def _required_pip():
+    return ARCH_PIP if IS_ARCH else ALL_PIP
 
 
 def _in_our_venv() -> bool:
@@ -53,35 +60,69 @@ def _run(*cmd, check=True, show=True):
     return result
 
 
+def _installed_pip() -> list:
+    """Читает список уже установленных пакетов из маркера."""
+    try:
+        import json as _json
+        return _json.loads(VENV_MARKER.read_text())
+    except Exception:
+        return []
+
+
+def _mark_installed(pkgs: list):
+    import json as _json
+    VENV_MARKER.write_text(_json.dumps(sorted(pkgs)))
+
+
+def _install_pip(pkgs: list):
+    if not pkgs:
+        return
+    print(f"  Устанавливаю: {', '.join(pkgs)}")
+    _run(str(VENV_PIP), 'install', '--quiet', *pkgs)
+
+
 def _bootstrap():
+    required = sorted(_required_pip())
+
     if _in_our_venv():
-        return  # уже внутри нужного venv, всё готово
+        # Проверяем нет ли новых пакетов добавленных после создания venv
+        installed = _installed_pip()
+        missing = [p for p in required if p not in installed]
+        if missing:
+            print(f"\nДоустанавливаю новые зависимости: {', '.join(missing)}")
+            _install_pip(missing)
+            _mark_installed(required)
+        return
 
     if VENV_MARKER.exists():
-        _reexec()  # venv готов, просто перезапустить
+        # Venv существует -- проверить нет ли новых пакетов
+        installed = _installed_pip()
+        missing = [p for p in required if p not in installed]
+        if missing:
+            print(f"\nОбновляю зависимости: {', '.join(missing)}")
+            _install_pip(missing)
+            _mark_installed(required)
+        _reexec()
 
     # --- Первый запуск: полная установка ---
     print("\n\033[1m=== Первый запуск: устанавливаю зависимости ===\033[0m\n")
 
     if IS_ARCH:
         print("Arch Linux -- ставлю системные пакеты через pacman...")
-        pkgs = ['python-requests', 'python-tqdm', 'python-mutagen', 'python-ytmusicapi']
-        _run('sudo', 'pacman', '-S', '--needed', '--noconfirm', *pkgs)
+        sys_pkgs = ['python-requests', 'python-tqdm', 'python-mutagen', 'python-ytmusicapi']
+        _run('sudo', 'pacman', '-S', '--needed', '--noconfirm', *sys_pkgs)
         print()
         print("Создаю виртуальное окружение (с доступом к системным пакетам)...")
         _run(sys.executable, '-m', 'venv', '--system-site-packages', str(VENV_DIR))
         print()
-        print("Доустанавливаю vk_api и browser_cookie3...")
-        _run(str(VENV_PIP), 'install', '--quiet', 'vk_api', 'browser_cookie3')
+        _install_pip(required)
     else:
         print("Создаю виртуальное окружение...")
         _run(sys.executable, '-m', 'venv', str(VENV_DIR))
         print()
-        print("Устанавливаю зависимости...")
-        pkgs = ['vk_api', 'ytmusicapi', 'mutagen', 'requests', 'tqdm', 'browser_cookie3']
-        _run(str(VENV_PIP), 'install', '--quiet', *pkgs)
+        _install_pip(required)
 
-    VENV_MARKER.touch()
+    _mark_installed(required)
     print("\n\033[92mЗависимости установлены.\033[0m Перезапускаю...\n")
     _reexec()
 
