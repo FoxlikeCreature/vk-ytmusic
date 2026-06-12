@@ -17341,10 +17341,38 @@ def _open_in_browser(url: str):
 
 
 def _captcha_handler(captcha):
+    import base64, subprocess, tempfile
     print(f"\n{C.WARN}  ВК просит капчу.{C.R}")
     url = captcha.get_url()
-    _open_in_browser(url)
-    print("  Картинка открылась в браузере.")
+    print(f"  URL: {url}")
+
+    # Скачать через сессию vk_api (у неё есть куки)
+    displayed = False
+    try:
+        resp = captcha.vk.http.get(url)
+        data = resp.content
+        print(f"  Content-Type: {resp.headers.get('content-type', '?')}")
+        print(f"  Первые байты: {data[:16].hex()}")
+        is_img = (data[:4] == b'\x89PNG' or data[:3] == b'\xff\xd8\xff'
+                  or data[:6] in (b'GIF87a', b'GIF89a'))
+        if is_img:
+            ext = ('.png' if data[:4] == b'\x89PNG' else
+                   '.gif' if data[:3] == b'GIF' else '.jpg')
+            p = Path(tempfile.gettempdir()) / f'vk_captcha{ext}'
+            p.write_bytes(data)
+            # Открываем локальный файл в Chrome — он умеет показывать картинки
+            subprocess.Popen(['google-chrome-stable', str(p)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"  Открыл {p} в Chrome.")
+            displayed = True
+        else:
+            print(f"  Содержимое не картинка. Пробую открыть URL в браузере...")
+    except Exception as e:
+        print(f"  Не удалось скачать: {e}")
+
+    if not displayed:
+        _open_in_browser(url)
+
     key = input("  Введи текст с картинки: ").strip()
     return captcha.try_again(key)
 
