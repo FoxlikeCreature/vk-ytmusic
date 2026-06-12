@@ -17351,14 +17351,11 @@ def _wizard_config():
         print(f"  Открой вручную:\n  {C.BOLD}{VK_OAUTH_URL}{C.R}\n")
     input("  Нажал «Разрешить»? Нажми Enter...")
     print()
-    print(f"  В адресной строке будет примерно такой URL:")
-    print(f"  {C.DIM}https://oauth.vk.com/blank.html#access_token=vk1.a.AbCdEf...&expires_in=...{C.R}")
-    print(f"  Скопируй часть после {C.BOLD}access_token={C.R} и до первого {C.BOLD}&{C.R}\n")
-    vk_token = _ask("Токен").strip()
-    if '&' in vk_token:
-        vk_token = vk_token.split('&')[0]
-    if vk_token.startswith('access_token='):
-        vk_token = vk_token[len('access_token='):]
+    print(f"  Теперь скопируй адресную строку браузера целиком и вставь сюда.\n")
+    vk_token = _ask("Ссылка или токен").strip()
+    # Вытащить access_token из URL вида ...blank.html#access_token=vk1.a...&expires_in=...
+    if 'access_token=' in vk_token:
+        vk_token = vk_token.split('access_token=', 1)[1].split('&')[0]
 
     # --- 2/3: target page ---
     print()
