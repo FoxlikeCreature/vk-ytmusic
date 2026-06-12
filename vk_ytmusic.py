@@ -17494,25 +17494,38 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 # =============================================================================
 
 def _captcha_handler(captcha):
-    import tempfile, subprocess
+    import webbrowser, tempfile, subprocess
 
     print(f"\n{C.WARN}  ВК просит ввести капчу.{C.R}")
+    url = captcha.get_url()
+    print(f"  URL: {url}")
 
-    # Скачиваем через ту же HTTP-сессию vk_api (с куками) -- иначе VK не отдаёт картинку
+    # Сначала пробуем открыть URL напрямую в браузере (картинка VK публичная)
+    opened = False
     try:
-        resp = captcha.vk.http.get(captcha.get_url())
-        ctype = resp.headers.get('content-type', '')
-        ext = '.png' if 'png' in ctype else '.webp' if 'webp' in ctype else '.jpg'
-        img_path = Path(tempfile.gettempdir()) / f'vk_captcha{ext}'
-        img_path.write_bytes(resp.content)
+        webbrowser.open(url)
+        print("  Открыл в браузере.")
+        opened = True
+    except Exception:
+        pass
 
-        opener = 'start' if IS_WIN else 'xdg-open'
-        subprocess.Popen([opener, str(img_path)],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("  Картинка открылась в просмотрщике.")
-    except Exception as e:
-        print(f"  Не удалось открыть картинку: {e}")
-        print(f"  URL: {captcha.get_url()}")
+    # Если webbrowser не сработал — скачиваем и открываем локально
+    if not opened:
+        try:
+            import urllib.request
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req) as r:
+                data = r.read()
+            img_path = Path(tempfile.gettempdir()) / 'vk_captcha.png'
+            img_path.write_bytes(data)
+            opener = 'start' if IS_WIN else 'xdg-open'
+            subprocess.Popen([opener, str(img_path)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("  Открыл локальный файл.")
+        except Exception as e:
+            print(f"  Не удалось открыть: {e}")
+            print("  Открой URL выше вручную в браузере.")
 
     key = input("  Введи текст с картинки: ").strip()
     return captcha.try_again(key)
