@@ -17330,10 +17330,40 @@ def _wizard_config():
     print(f"\n{C.BOLD}=== Первоначальная настройка ==={C.R}\n")
     print("Конфиг не найден. Сейчас настроим всё вместе.\n")
 
-    print("  1/3  Данные ВКонтакте")
-    print("       Логин -- номер телефона или email аккаунта ВК.\n")
-    vk_login    = _ask("Логин ВК")
-    vk_password = _ask("Пароль ВК")
+    _VK_OAUTH_URL = (
+        "https://oauth.vk.com/authorize"
+        "?client_id=6287487"
+        "&scope=audio,offline"
+        "&redirect_uri=https://oauth.vk.com/blank.html"
+        "&display=page"
+        "&response_type=token"
+    )
+
+    print("  1/3  Токен ВКонтакте\n")
+    print("  Логин/пароль не работает -- ВК блокирует автоматический вход.")
+    print("  Нужно получить токен через браузер. Это займёт минуту.\n")
+    print(f"  1. Открой эту ссылку в браузере:\n")
+    print(f"     {C.BOLD}{_VK_OAUTH_URL}{C.R}\n")
+    print("  2. Войди в свой аккаунт ВК.\n")
+    print("  3. Нажми 'Разрешить'.\n")
+    print("  4. Страница станет пустой -- скопируй URL из адресной строки.")
+    print("     Он будет выглядеть так:")
+    print(f"     {C.DIM}https://oauth.vk.com/blank.html#access_token=ВОТ_ЭТО_КОПИРОВАТЬ&...{C.R}\n")
+    print("  5. Вставь ТОЛЬКО часть после access_token= и до следующего &\n")
+
+    raw = _ask("Вставь токен или весь URL").strip()
+    # Извлечь токен из URL если вставили весь URL
+    if 'access_token=' in raw:
+        import urllib.parse as _up
+        fragment = raw.split('#', 1)[-1]
+        params = dict(p.split('=', 1) for p in fragment.split('&') if '=' in p)
+        vk_token = params.get('access_token', raw)
+    else:
+        vk_token = raw
+
+    if not vk_token or len(vk_token) < 10:
+        _err("Токен слишком короткий. Попробуй заново.")
+        sys.exit(1)
 
     print()
     print("  2/3  Откуда брать музыку")
@@ -17357,9 +17387,8 @@ def _wizard_config():
 
     config = {
         "vk": {
-            "login":    vk_login,
-            "password": vk_password,
-            "target":   vk_target,
+            "token":  vk_token,
+            "target": vk_target,
         },
         "ytmusic": {
             "auth_file": "browser.json",
@@ -17493,43 +17522,29 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 # VK
 # =============================================================================
 
-def _captcha_handler(captcha):
-    import tempfile, subprocess, urllib.request
-
-    print(f"\n{C.WARN}  ВК просит ввести капчу.{C.R}")
-
-    # Скачиваем картинку и открываем локально
-    try:
-        img_path = Path(tempfile.gettempdir()) / 'vk_captcha.jpg'
-        urllib.request.urlretrieve(captcha.get_url(), img_path)
-        if IS_WIN:
-            os.startfile(img_path)
-        else:
-            subprocess.Popen(['xdg-open', str(img_path)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"  Картинка открылась в просмотрщике.")
-    except Exception:
-        print(f"  Не удалось открыть картинку. URL: {captcha.get_url()}")
-
-    key = input("  Введи текст с картинки: ").strip()
-    return captcha.try_again(key)
-
-
-def _vk_login(login: str, password: str):
+def _vk_login(vk_cfg: dict):
     import vk_api as vk_mod
-    session = vk_mod.VkApi(
-        login=login,
-        password=password,
-        captcha_handler=_captcha_handler,
-    )
+
+    token = vk_cfg.get('token')
+    if token:
+        return vk_mod.VkApi(token=token)
+
+    # Старый формат config (login/password) -- попробовать, но предупредить
+    login    = vk_cfg.get('login', '')
+    password = vk_cfg.get('password', '')
+    if not login:
+        _err("В config.json нет ни 'token', ни 'login'. Удали config.json и запусти заново.")
+        sys.exit(1)
+
+    _warn("Используется устаревший login/password. Рекомендуется переключиться на token.")
+    _warn("Удали config.json и запусти скрипт заново чтобы пройти новую настройку.")
+
+    session = vk_mod.VkApi(login=login, password=password)
     try:
         session.auth()
     except vk_mod.AuthError as e:
         _err(f"Не удалось войти в ВК: {e}")
-        _err("Проверь логин и пароль в config.json")
         sys.exit(1)
-    except vk_mod.exceptions.Captcha as captcha:
-        _captcha_handler(captcha)
     return session
 
 
@@ -17709,7 +17724,7 @@ def run(config: dict, dry_run: bool, reset: bool):
         print(f"{C.WARN}Режим dry-run: треки не лайкаются и не загружаются{C.R}\n")
 
     print("Авторизация в ВКонтакте...")
-    vk_session = _vk_login(vk_cfg['login'], vk_cfg['password'])
+    vk_session = _vk_login(vk_cfg)
 
     print("Авторизация в YouTube Music...")
     ytm = _ytm_login(ytm_cfg['auth_file'])
