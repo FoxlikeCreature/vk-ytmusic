@@ -152,20 +152,22 @@ def setup_ytmusic_auth():
 """)
     input("  Нажми Enter чтобы начать...")
 
-    ytmusicapi_bin = VENV_DIR / ('Scripts/ytmusicapi.exe' if IS_WIN else 'bin/ytmusicapi')
-    if not ytmusicapi_bin.exists():
-        # Попробовать через python -m
-        ytmusicapi_bin = None
+    # Ищем бинарник ytmusicapi: сначала в venv, потом в системе (pacman)
+    ytmusicapi_bin = shutil.which('ytmusicapi', path=str(VENV_DIR / ('Scripts' if IS_WIN else 'bin')))
+    if not ytmusicapi_bin:
+        ytmusicapi_bin = shutil.which('ytmusicapi')
 
-    if ytmusicapi_bin:
-        cmd = [str(ytmusicapi_bin), 'oauth', str(oauth_path)]
-    else:
-        cmd = [str(VENV_PY), '-m', 'ytmusicapi', 'oauth', str(oauth_path)]
+    if not ytmusicapi_bin:
+        err("Не найден бинарник ytmusicapi. Убедись что пакет установлен:")
+        err("  sudo pacman -S python-ytmusicapi")
+        sys.exit(1)
+
+    cmd = [ytmusicapi_bin, 'oauth', str(oauth_path)]
 
     result = subprocess.run(cmd)
     if result.returncode != 0 or not oauth_path.exists():
         err("Авторизация не прошла. Попробуй вручную:")
-        err(f"  {str(ytmusicapi_bin or VENV_PY)} -m ytmusicapi oauth {oauth_path}")
+        err(f"  ytmusicapi oauth {oauth_path}")
         sys.exit(1)
 
     ok("YouTube Music авторизован")
