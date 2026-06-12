@@ -17286,6 +17286,7 @@ if str(DEPS_DIR) not in sys.path:
 import json
 import re
 import shutil
+import tempfile
 import time
 from difflib import SequenceMatcher
 
