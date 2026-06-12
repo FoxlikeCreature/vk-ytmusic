@@ -17493,15 +17493,28 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 # VK
 # =============================================================================
 
+def _captcha_handler(captcha):
+    print(f"\n{C.WARN}  ВК просит ввести капчу.{C.R}")
+    print(f"  Открой в браузере: {C.BOLD}{captcha.get_url()}{C.R}")
+    key = input("  Введи текст с картинки: ").strip()
+    return captcha.try_again(key)
+
+
 def _vk_login(login: str, password: str):
     import vk_api as vk_mod
-    session = vk_mod.VkApi(login=login, password=password)
+    session = vk_mod.VkApi(
+        login=login,
+        password=password,
+        captcha_handler=_captcha_handler,
+    )
     try:
         session.auth()
     except vk_mod.AuthError as e:
         _err(f"Не удалось войти в ВК: {e}")
         _err("Проверь логин и пароль в config.json")
         sys.exit(1)
+    except vk_mod.exceptions.Captcha as captcha:
+        _captcha_handler(captcha)
     return session
 
 
