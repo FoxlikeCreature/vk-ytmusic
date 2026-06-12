@@ -17870,10 +17870,11 @@ def run(config: dict, dry_run: bool, reset: bool):
             stats['skipped'] += 1
             continue
 
-        if not track['artist'] and not track['title']:
+        _STUB = {'', 'unknown', 'untitled', 'без названия', 'неизвестный исполнитель'}
+        if (track['artist'].lower() in _STUB and track['title'].lower() in _STUB):
             done_ids.add(track_id)
             _save_progress(resume_path, done_ids)
-            stats['errors'] += 1
+            stats['skipped'] += 1
             continue
 
         try:
