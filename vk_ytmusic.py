@@ -17542,13 +17542,17 @@ def _read_chrome_vk_cookies() -> dict:
                 try:
                     r = subprocess.run(
                         ['openssl', 'enc', '-d', '-aes-128-cbc',
-                         '-K', key.hex(), '-iv', iv.hex(), '-nosalt'],
+                         '-K', key.hex(), '-iv', iv.hex(), '-nosalt', '-nopad'],
                         input=enc[3:], capture_output=True, timeout=5)
                     raw = r.stdout
                     if raw:
+                        # Remove PKCS7 padding
                         pad = raw[-1]
                         if 1 <= pad <= 16:
                             raw = raw[:-pad]
+                        # Chrome v10/v11 on Linux prepends 32 random bytes before the actual value
+                        if len(raw) > 32:
+                            raw = raw[32:]
                         cookies[name] = raw.decode('utf-8', errors='ignore')
                 except Exception:
                     pass
@@ -17568,18 +17572,14 @@ def _vk_browser_session():
         return None
     import requests as req_mod
     sess = req_mod.Session()
+    # Mobile UA — нужен для m.vk.com (VkAudio использует мобильный сайт)
     sess.headers['User-Agent'] = (
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-    # Отправляем только нужные куки с безопасными значениями
-    important = ('remixsid', 'remixsts', 'remixsf', 'remixdt',
-                 'remixlang', 'remixua', 'p', 'l', 'domain_sid')
+        'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 '
+        '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36')
+    sess.headers['X-Requested-With'] = 'XMLHttpRequest'
     for k, v in cookies.items():
-        if k not in important:
-            continue
         try:
             v.encode('latin-1')
-            # Куки не должны содержать ; , " пробел
             if any(c in v for c in '",; \t\n\r'):
                 continue
             sess.cookies.set(k, v, domain='.vk.com')
@@ -17610,8 +17610,6 @@ def _vk_resolve_id(sess, target: str) -> int:
     try:
         r = sess.get(f"https://vk.com/{target}", timeout=30,
                      allow_redirects=True)
-        _info(f"URL после редиректа: {r.url}")
-        _info(f"Первые 300 символов: {r.text[:300]!r}")
         # /id123456 redirect
         if '/id' in r.url:
             m = re.search(r'/id(\d+)', r.url)
@@ -17624,8 +17622,8 @@ def _vk_resolve_id(sess, target: str) -> int:
             m = re.search(pattern, r.text)
             if m:
                 return int(m.group(1))
-    except Exception as e:
-        _info(f"Не удалось спарсить страницу: {e}")
+    except Exception:
+        pass
 
     _err(f"Страница '{target}' не найдена. Проверь 'target' в config.json")
     sys.exit(1)
@@ -17640,27 +17638,63 @@ def _get_thumb_url(item: dict) -> str:
     return ''
 
 
-def _get_vk_tracks(sess, owner_id: int) -> List[Dict]:
+def _make_vk_audio_session(sess):
+    """Создаёт VkApi-сессию с браузерными куками и возвращает (vk_audio_obj, user_id, total)."""
     import vk_api as vk_mod
-    # Инжектим браузерные куки в vk_api сессию, пропуская логин
+    from vk_api.audio import VkAudio
+    from vk_api.utils import set_cookies_from_list
+
     vk_sess = vk_mod.VkApi()
     vk_sess.http.cookies.update(sess.cookies)
     vk_sess.http.headers.update(sess.headers)
+    set_cookies_from_list(vk_sess.http.cookies, VkAudio.DEFAULT_COOKIES)
+    vk_sess.http.get('https://m.vk.com/')
+    return vk_sess
+
+
+def _get_vk_tracks(sess, owner_id: int):
+    """Возвращает (total_count, generator) для треков ВК."""
+    import vk_api as vk_mod
     from vk_api.audio import VkAudio
-    tracks = []
+    from vk_api.utils import set_cookies_from_list
+
+    vk_sess = _make_vk_audio_session(sess)
+
     try:
-        for item in VkAudio(vk_sess).get_iter(owner_id=owner_id):
-            tracks.append({
-                'id':     f"{item.get('owner_id')}_{item.get('id')}",
-                'artist': (item.get('artist') or '').strip(),
-                'title':  (item.get('title') or '').strip(),
-                'url':    item.get('url') or '',
-                'thumb':  _get_thumb_url(item),
-            })
+        probe = vk_sess.http.post(
+            'https://m.vk.com/audio',
+            data={'act': 'load_section', 'owner_id': owner_id,
+                  'playlist_id': -1, 'offset': 0, 'type': 'playlist', 'is_loading_all': 1},
+            headers={'X-Requested-With': 'XMLHttpRequest'},
+        ).json()
+        meta   = probe.get('statsMeta', {})
+        user_id = meta.get('id') or owner_id
+        total   = probe.get('data', [{}])[0].get('totalCount', 0) if probe.get('data') else 0
     except Exception as e:
-        _err(f"Ошибка при получении треков: {e}")
+        _err(f"Не удалось получить список треков: {e}")
         sys.exit(1)
-    return tracks
+
+    audio = object.__new__(VkAudio)
+    audio._vk = vk_sess
+    audio.user_id = user_id
+    audio.convert_m3u8_links = True
+    set_cookies_from_list(vk_sess.http.cookies, VkAudio.DEFAULT_COOKIES)
+
+    def _gen():
+        try:
+            for item in audio.get_iter(owner_id=owner_id):
+                yield {
+                    'id':     f"{item.get('owner_id')}_{item.get('id')}",
+                    'artist': (item.get('artist') or '').strip(),
+                    'title':  (item.get('title') or '').strip(),
+                    'url':    item.get('url') or '',
+                    'thumb':  _get_thumb_url(item),
+                }
+        except Exception as e:
+            _err(f"Ошибка при получении треков: {e}")
+            sys.exit(1)
+
+    return total, _gen()
 
 
 # =============================================================================
@@ -17803,31 +17837,34 @@ def run(config: dict, dry_run: bool, reset: bool):
 
     print(f"Определяем страницу '{vk_cfg['target']}'...")
     owner_id = _vk_resolve_id(vk_sess, vk_cfg['target'])
-    _info(f"owner_id = {owner_id}")
 
-    print("Загружаем треки из ВК...")
-    tracks = _get_vk_tracks(vk_sess, owner_id)
-    total  = len(tracks)
+    print("Подключаюсь к ВК, считаю треки...")
+    total, track_gen = _get_vk_tracks(vk_sess, owner_id)
     print(f"Найдено треков: {C.BOLD}{total}{C.R}\n")
 
     stats = {'found': 0, 'uploaded': 0, 'skipped': 0, 'errors': 0}
 
     try:
         from tqdm import tqdm
-        pbar     = tqdm(tracks, unit='трек', dynamic_ncols=True)
+        pbar     = tqdm(track_gen, total=total, unit='трек',
+                        dynamic_ncols=True, ncols=80)
         tprint   = tqdm.write
     except ImportError:
-        pbar     = tracks
+        pbar     = track_gen
         tprint   = print
 
-    for i, track in enumerate(pbar):
+    i = 0
+    for track in pbar:
         track_id = track['id']
         label    = f"{track['artist']} - {track['title']}"
 
-        if hasattr(pbar, 'set_description'):
+        if hasattr(pbar, 'set_postfix_str'):
+            pbar.set_postfix_str(label[:50], refresh=False)
+        elif hasattr(pbar, 'set_description'):
             pbar.set_description(label[:55])
         else:
             print(f"[{i+1}/{total}] {label}")
+        i += 1
 
         if track_id in done_ids:
             stats['skipped'] += 1
