@@ -17363,6 +17363,63 @@ def _wizard_config():
     _ok(f"Конфиг сохранён: {config_path.name}")
 
 
+def _chrome_profiles() -> list:
+    """Возвращает список (dir_name, display_name, email) для всех Chrome профилей."""
+    profiles = []
+    chrome_dir = Path.home() / '.config/google-chrome'
+    if not chrome_dir.exists():
+        return profiles
+    for d in sorted(chrome_dir.iterdir()):
+        prefs = d / 'Preferences'
+        cookies = d / 'Cookies'
+        if not prefs.exists() or not cookies.exists():
+            continue
+        try:
+            data = json.loads(prefs.read_text(encoding='utf-8', errors='ignore'))
+            accounts = data.get('account_info', [])
+            email = accounts[0].get('email', '') if accounts else ''
+            name = data.get('profile', {}).get('name', d.name)
+            profiles.append((d.name, name, email))
+        except Exception:
+            pass
+    return profiles
+
+
+def _extract_cookies_chrome(profile_dir: str) -> Optional[str]:
+    try:
+        import browser_cookie3
+        cookie_file = str(Path.home() / '.config/google-chrome' / profile_dir / 'Cookies')
+        jar = browser_cookie3.chrome(domain_name='.youtube.com', cookie_file=cookie_file)
+        cookies = {c.name: c.value for c in jar}
+        if 'SAPISID' in cookies:
+            return '; '.join(f'{k}={v}' for k, v in cookies.items())
+    except Exception:
+        pass
+    return None
+
+
+def _extract_cookies_browser(browser: str) -> Optional[str]:
+    try:
+        import browser_cookie3
+        extractors = {
+            'firefox': browser_cookie3.firefox,
+            'opera':   browser_cookie3.opera,
+            'brave':   browser_cookie3.brave,
+            'chromium': browser_cookie3.chromium,
+            'vivaldi': browser_cookie3.vivaldi,
+        }
+        fn = extractors.get(browser.lower())
+        if not fn:
+            return None
+        jar = fn(domain_name='.youtube.com')
+        cookies = {c.name: c.value for c in jar}
+        if 'SAPISID' in cookies:
+            return '; '.join(f'{k}={v}' for k, v in cookies.items())
+    except Exception:
+        pass
+    return None
+
+
 def _try_auto_cookie_extract() -> Optional[str]:
     """Пробует автоматически достать куки YouTube из установленных браузеров."""
     try:
@@ -17439,41 +17496,84 @@ def _ytm_auth_valid(auth_path: Path) -> bool:
 
 
 def _wizard_ytmusic_auth(auth_file: str, force: bool = False):
-    """Авторизация YouTube Music: сначала авто, потом 1 команда в браузере."""
+    """Авторизация YouTube Music с выбором браузера и профиля Chrome."""
     auth_path = HERE / auth_file
     if auth_path.exists() and not force:
         return
 
+    try:
+        import browser_cookie3
+        has_bc3 = True
+    except ImportError:
+        has_bc3 = False
+
     print(f"\n{C.BOLD}=== Авторизация YouTube Music ==={C.R}\n")
-    print("  Пробую получить куки автоматически из браузера...")
 
-    cookie_str = _try_auto_cookie_extract()
-    if cookie_str:
-        _save_ytm_auth(auth_path, cookie_str)
-        _ok("YouTube Music авторизован автоматически!")
-        return
+    cookie_str = None
 
-    # Ручной метод: одна команда в консоли браузера
-    _warn("Автоматически не вышло (возможно браузер закрыт или куки недоступны).\n")
-    print("  Нужно выполнить одну команду в браузере. Это займёт минуту.\n")
-    print(f"  1. Открой любой браузер, перейди на  {C.BOLD}music.youtube.com{C.R}")
-    print(f"     Убедись что ты залогинен в нужный Google аккаунт.\n")
-    print(f"  2. Нажми  {C.BOLD}F12{C.R}  -- откроется панель разработчика.\n")
-    print(f"  3. Перейди на вкладку  {C.BOLD}Console{C.R}  (Консоль).\n")
-    print(f"  4. Вставь туда эту команду и нажми Enter:\n")
-    print(f"       {C.BOLD}copy(document.cookie){C.R}\n")
-    print(f"     {C.DIM}Ничего не отобразится -- это нормально.")
-    print(f"     Куки уже скопированы в буфер обмена.{C.R}\n")
-    input("  Выполнил? Нажми Enter...")
-    print(f"  Теперь вставь сюда (Ctrl+V) и нажми Enter:")
-    cookie_str = input("  > ").strip()
+    if has_bc3:
+        # Собираем доступные варианты
+        options = []
 
-    if len(cookie_str) < 20:
-        _err("Строка слишком короткая. Убедись что выполнил команду на music.youtube.com")
-        sys.exit(1)
+        chrome_profiles = _chrome_profiles()
+        if chrome_profiles:
+            if len(chrome_profiles) == 1:
+                d, name, email = chrome_profiles[0]
+                label = f"Chrome — {name}" + (f" ({email})" if email else "")
+                options.append(('chrome', d, label))
+            else:
+                for d, name, email in chrome_profiles:
+                    label = f"Chrome — {name}" + (f" ({email})" if email else "")
+                    options.append(('chrome', d, label))
 
-    if 'SAPISID' not in cookie_str and 'VISITOR_INFO' not in cookie_str:
-        _warn("Не найдены ожидаемые куки YouTube. Продолжаю, но авторизация может не работать.")
+        for browser, fn_name in [('Firefox', 'firefox'), ('Opera', 'opera'),
+                                   ('Brave', 'brave'), ('Chromium', 'chromium')]:
+            if hasattr(browser_cookie3, fn_name):
+                options.append((fn_name, None, browser))
+
+        if options:
+            print("  Из какого браузера взять авторизацию?\n")
+            for i, (_, _, label) in enumerate(options, 1):
+                print(f"    {C.BOLD}{i}{C.R}) {label}")
+            print(f"    {C.BOLD}{len(options)+1}{C.R}) Ввести куки вручную\n")
+
+            while True:
+                raw = input(f"  Выбор [1-{len(options)+1}]: ").strip()
+                try:
+                    choice = int(raw)
+                    if 1 <= choice <= len(options) + 1:
+                        break
+                except ValueError:
+                    pass
+
+            if choice <= len(options):
+                browser_type, profile_dir, label = options[choice - 1]
+                print(f"  Читаю куки: {label}...")
+                if browser_type == 'chrome' and profile_dir:
+                    cookie_str = _extract_cookies_chrome(profile_dir)
+                else:
+                    cookie_str = _extract_cookies_browser(browser_type)
+
+                if cookie_str:
+                    _ok(f"Куки получены: {label}")
+                else:
+                    _warn("Не удалось получить куки, попробуем вручную.")
+
+    if not cookie_str:
+        print("  Нужно выполнить одну команду в браузере.\n")
+        print(f"  1. Перейди на  {C.BOLD}music.youtube.com{C.R}  и войди в нужный аккаунт.\n")
+        print(f"  2. Открой DevTools (F12) → вкладка Console.\n")
+        print(f"  3. Выполни команду:\n")
+        print(f"       {C.BOLD}copy(document.cookie){C.R}\n")
+        input("  Готово? Нажми Enter...")
+        print(f"  Вставь куки (Ctrl+V):")
+        cookie_str = input("  > ").strip()
+
+        if len(cookie_str) < 20:
+            _err("Строка слишком короткая.")
+            sys.exit(1)
+        if 'SAPISID' not in cookie_str and 'VISITOR_INFO' not in cookie_str:
+            _warn("Куки YouTube не найдены, авторизация может не работать.")
 
     _save_ytm_auth(auth_path, cookie_str)
     _ok("YouTube Music авторизован!")
