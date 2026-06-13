@@ -17857,39 +17857,23 @@ def _vk_resolve_id(sess, target: str) -> int:
         pass
 
     # Fallback: парсим страницу профиля
-    # None в headers явно удаляет заголовок из запроса (requests merge semantics)
-    for base_url in (f"https://vk.com/{target}", f"https://m.vk.com/{target}"):
-        try:
-            r = sess.get(base_url, timeout=30, allow_redirects=True,
-                         headers={'X-Requested-With': None})
-            # /id123456 redirect
-            if '/id' in r.url:
-                m = re.search(r'/id(\d+)', r.url)
-                if m:
-                    return int(m.group(1))
-            text = r.text
-            # JSON-ответ от ВК (если XHR всё же пробился)
-            if text.lstrip().startswith('{'):
-                try:
-                    data = json.loads(text)
-                    oid = (data.get('user', {}).get('id')
-                           or data.get('id')
-                           or data.get('object_id'))
-                    if oid:
-                        return int(oid)
-                except Exception:
-                    pass
-            # owner_id в HTML
-            for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
-                            r'"id"\s*:\s*(\d+)',
-                            r'page_owner_id["\s:]+(-?\d+)',
-                            r'data-id="(\d+)"',
-                            r'vk\.id\s*=\s*(\d+)'):
-                m = re.search(pattern, text)
-                if m:
-                    return int(m.group(1))
-        except Exception:
-            pass
+    try:
+        r = sess.get(f"https://vk.com/{target}", timeout=30,
+                     allow_redirects=True)
+        # /id123456 redirect
+        if '/id' in r.url:
+            m = re.search(r'/id(\d+)', r.url)
+            if m:
+                return int(m.group(1))
+        # owner_id в HTML
+        for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
+                        r'"id"\s*:\s*(\d+)',
+                        r'page_owner_id["\s:]+(-?\d+)'):
+            m = re.search(pattern, r.text)
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
 
     _err(f"Страница '{target}' не найдена. Проверь 'target' в config.json")
     sys.exit(1)
@@ -17912,15 +17896,9 @@ def _make_vk_audio_session(sess):
 
     vk_sess = vk_mod.VkApi()
     vk_sess.http.cookies.update(sess.cookies)
-    # Только User-Agent — НЕ копируем X-Requested-With: он нужен только для конкретных
-    # API-запросов (и там ставится явно). Если он есть в сессии — m.vk.com вернёт JSON
-    # вместо HTML при инициализации, и аудио-сессия не откроется.
-    ua = sess.headers.get('User-Agent', '')
-    if ua:
-        vk_sess.http.headers['User-Agent'] = ua
+    vk_sess.http.headers.update(sess.headers)
     set_cookies_from_list(vk_sess.http.cookies, VkAudio.DEFAULT_COOKIES)
-    # Инициализируем мобильную сессию без XHR-заголовка — нужен HTML-ответ
-    vk_sess.http.get('https://m.vk.com/', headers={'X-Requested-With': None})
+    vk_sess.http.get('https://m.vk.com/')
     return vk_sess
 
 
@@ -17933,31 +17911,24 @@ def _get_vk_tracks(sess, owner_id: int):
     vk_sess = _make_vk_audio_session(sess)
 
     try:
-        resp = vk_sess.http.post(
+        probe = vk_sess.http.post(
             'https://m.vk.com/audio',
             data={'act': 'load_section', 'owner_id': owner_id,
                   'playlist_id': -1, 'offset': 0, 'type': 'playlist', 'is_loading_all': 1},
             headers={'X-Requested-With': 'XMLHttpRequest'},
-        )
-        probe = resp.json()
+        ).json()
         _info(f"VK audio probe: {str(probe)[:300]}")
+        meta    = probe.get('statsMeta', {})
+        user_id = meta.get('id') or owner_id
+        total   = probe.get('data', [{}])[0].get('totalCount', 0) if probe.get('data') else 0
     except Exception as e:
         _err(f"Не удалось получить список треков: {e}")
         sys.exit(1)
 
-    # Диагностика: ВК вернул ошибку или редирект на логин
-    if probe.get('redirect') or probe.get('error'):
-        _err(f"VK не принял сессию: {probe.get('redirect') or probe.get('error')}")
-        _err("Сессия ВК невалидна для аудио. Закрой браузер, запусти скрипт заново.")
-        sys.exit(1)
     if not probe.get('data'):
         _err(f"VK вернул пустой ответ (нет 'data'): {str(probe)[:400]}")
         _err("Возможно куки ВК не дают доступ к аудио. Попробуй другой браузер или обнови куки.")
         sys.exit(1)
-
-    meta    = probe.get('statsMeta', {})
-    user_id = meta.get('id') or owner_id
-    total   = probe['data'][0].get('totalCount', 0)
 
     vk_audio = object.__new__(VkAudio)
     vk_audio._vk = vk_sess
@@ -18251,6 +18222,7 @@ def run(config: dict, dry_run: bool, reset: bool):
 
     print(f"Определяем страницу '{vk_cfg['target']}'...")
     owner_id = _vk_resolve_id(vk_sess, vk_cfg['target'])
+    _info(f"owner_id = {owner_id}")
 
     print("Подключаюсь к ВК, считаю треки...")
     total, track_gen, vk_audio = _get_vk_tracks(vk_sess, owner_id)
