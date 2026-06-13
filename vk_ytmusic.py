@@ -17948,8 +17948,12 @@ def _get_vk_tracks(sess, owner_id: int):
                 _info(f"owner_id={owner_id} вернул data=[False], пробую statsMeta.id={fallback_id}")
                 owner_id = fallback_id
                 probe = _probe(owner_id)
-                _info(f"VK audio probe (retry): {str(probe)[:300]}")
+                _info(f"VK audio probe (retry): {str(probe)[:500]}")
                 data0 = (probe.get('data') or [None])[0]
+
+        if isinstance(data0, dict):
+            _info(f"data0 keys: {list(data0.keys())}")
+            _info(f"data0 totalCount={data0.get('totalCount')} accessHash={data0.get('accessHash') or data0.get('access_hash')}")
 
         meta    = (probe.get('statsMeta') or {})
         user_id = meta.get('id') or owner_id
