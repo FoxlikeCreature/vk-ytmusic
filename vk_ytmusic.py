@@ -17927,18 +17927,31 @@ def _get_vk_tracks(sess, owner_id: int):
     vk_sess = _make_vk_audio_session(sess)
 
     try:
-        probe = vk_sess.http.post(
+        resp = vk_sess.http.post(
             'https://m.vk.com/audio',
             data={'act': 'load_section', 'owner_id': owner_id,
                   'playlist_id': -1, 'offset': 0, 'type': 'playlist', 'is_loading_all': 1},
             headers={'X-Requested-With': 'XMLHttpRequest'},
-        ).json()
-        meta   = probe.get('statsMeta', {})
-        user_id = meta.get('id') or owner_id
-        total   = probe.get('data', [{}])[0].get('totalCount', 0) if probe.get('data') else 0
+        )
+        probe = resp.json()
+        _info(f"VK audio probe: {str(probe)[:300]}")
     except Exception as e:
         _err(f"Не удалось получить список треков: {e}")
         sys.exit(1)
+
+    # Диагностика: ВК вернул ошибку или редирект на логин
+    if probe.get('redirect') or probe.get('error'):
+        _err(f"VK не принял сессию: {probe.get('redirect') or probe.get('error')}")
+        _err("Сессия ВК невалидна для аудио. Закрой браузер, запусти скрипт заново.")
+        sys.exit(1)
+    if not probe.get('data'):
+        _err(f"VK вернул пустой ответ (нет 'data'): {str(probe)[:400]}")
+        _err("Возможно куки ВК не дают доступ к аудио. Попробуй другой браузер или обнови куки.")
+        sys.exit(1)
+
+    meta    = probe.get('statsMeta', {})
+    user_id = meta.get('id') or owner_id
+    total   = probe['data'][0].get('totalCount', 0)
 
     vk_audio = object.__new__(VkAudio)
     vk_audio._vk = vk_sess
