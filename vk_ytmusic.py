@@ -17831,6 +17831,8 @@ def _vk_browser_session():
         '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36')
     sess.headers['X-Requested-With'] = 'XMLHttpRequest'
     for k, v in cookies.items():
+        if k.startswith('ma__'):
+            continue
         try:
             v.encode('latin-1')
             if any(c in v for c in '",; \t\n\r'):
@@ -18216,8 +18218,12 @@ def run(config: dict, dry_run: bool, reset: bool):
         cookies: dict = {}
         for part in raw.split(';'):
             k, _, v = part.strip().partition('=')
-            if k.strip() and v.strip():
-                cookies[k.strip()] = v.strip()
+            k = k.strip()
+            if k and v.strip():
+                # ma__ui/ma__id куки — Multi-Account VK. Если их оставить, мобильный
+                # аудио-API вернёт треки вторичного аккаунта, а не основного remixsid.
+                if not k.startswith('ma__'):
+                    cookies[k] = v.strip()
         if 'remixsid' not in cookies and 'remixstid' not in cookies:
             _err("Не найден ни remixsid, ни remixstid.")
             _err("Убедись что ты скопировал куки из Network-вкладки (не из Console),")
