@@ -17752,15 +17752,35 @@ def _like(ytm, video_id: str, dry_run: bool) -> bool:
         return False
 
 
-def _upload(ytm, mp3_path: Path, dry_run: bool) -> bool:
+def _upload(ytm, mp3_path: Path, dry_run: bool, before_ids: set = None) -> bool:
     if dry_run:
         return True
     try:
         status = ytm.upload_song(str(mp3_path))
-        return status is None or status == 200 or (isinstance(status, str) and 'SUCCEEDED' in status)
+        ok = status is None or status == 200 or (
+            hasattr(status, 'value') and 'SUCCEEDED' in str(status.value)
+        ) or (isinstance(status, str) and 'SUCCEEDED' in status)
+        if ok and before_ids is not None:
+            _like_uploaded(ytm, before_ids)
+        return ok
     except Exception as e:
         _warn(f"Ошибка загрузки {mp3_path.name}: {e}")
         return False
+
+
+def _like_uploaded(ytm, before_ids: set):
+    """Лайкает только что загруженный трек (тот которого не было до загрузки)."""
+    for attempt in range(8):
+        time.sleep(4 if attempt == 0 else 5)
+        try:
+            songs = ytm.get_library_upload_songs(limit=20)
+            for s in songs:
+                vid = s.get('videoId')
+                if vid and vid not in before_ids:
+                    ytm.rate_song(vid, 'LIKE')
+                    return
+        except Exception:
+            pass
 
 
 # =============================================================================
@@ -17912,6 +17932,14 @@ def run(config: dict, dry_run: bool, reset: bool):
     print("Авторизация в YouTube Music...")
     ytm = _ytm_login(ytm_cfg['auth_file'])
 
+    # Снапшот уже загруженных треков — чтобы правильно находить новый при лайке
+    try:
+        _upload_ids_before: set = {
+            s['videoId'] for s in ytm.get_library_upload_songs(limit=50) if s.get('videoId')
+        }
+    except Exception:
+        _upload_ids_before = set()
+
     print(f"Определяем страницу '{vk_cfg['target']}'...")
     owner_id = _vk_resolve_id(vk_sess, vk_cfg['target'])
 
@@ -17991,7 +18019,7 @@ def run(config: dict, dry_run: bool, reset: bool):
                     thumb_data = _download(track['thumb']) if track['thumb'] else None
                     _tag(mp3, track['artist'], track['title'], thumb_data)
 
-                    if _upload(ytm, mp3, dry_run):
+                    if _upload(ytm, mp3, dry_run, _upload_ids_before):
                         tprint(f"{C.UP}  ^{C.R}  Загружен из ВК: {label}")
                         stats['uploaded'] += 1
                         time.sleep(1)
@@ -18033,7 +18061,7 @@ def run(config: dict, dry_run: bool, reset: bool):
             mp3.write_bytes(audio_data)
             thumb_data = _download(track['thumb']) if track['thumb'] else None
             _tag(mp3, track['artist'], track['title'], thumb_data)
-            if _upload(ytm, mp3, dry_run):
+            if _upload(ytm, mp3, dry_run, _upload_ids_before):
                 _up(f"Загружен (ретрай): {label}")
                 stats['uploaded'] += 1
                 done_ids.add(track['id'])
