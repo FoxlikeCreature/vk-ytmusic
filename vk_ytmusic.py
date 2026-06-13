@@ -17935,11 +17935,15 @@ def _download(url: str, retries: int = 3) -> Optional[bytes]:
 
 def _download_hls(url: str, retries: int = 3) -> Optional[bytes]:
     import tempfile, subprocess as sp
+    ffmpeg = _ffmpeg_exe()
+    if not ffmpeg:
+        _warn("ffmpeg недоступен, HLS-трек пропускается")
+        return None
     for attempt in range(retries):
         tmp = Path(tempfile.mktemp(suffix='.mp3'))
         try:
             r = sp.run(
-                ['ffmpeg', '-y', '-i', url, '-vn', '-c:a', 'libmp3lame', '-q:a', '2',
+                [ffmpeg, '-y', '-i', url, '-vn', '-c:a', 'libmp3lame', '-q:a', '2',
                  '-loglevel', 'error', str(tmp)],
                 capture_output=True, timeout=120
             )
@@ -18180,12 +18184,187 @@ def run(config: dict, dry_run: bool, reset: bool):
 
 
 # =============================================================================
+# Управление зависимостями
+# =============================================================================
+
+def _check_python():
+    if sys.version_info < (3, 8):
+        v = f"{sys.version_info.major}.{sys.version_info.minor}"
+        print(f"\033[91m  !  \033[0mНужен Python 3.8+, у тебя {v}.")
+        if IS_WIN:
+            print("     Скачай с https://www.python.org/downloads/")
+        else:
+            print("     Обнови Python через менеджер пакетов системы.")
+        sys.exit(1)
+
+
+def _detect_pm() -> Optional[str]:
+    import shutil
+    if IS_WIN:
+        return 'winget' if shutil.which('winget') else None
+    for pm in ('pacman', 'apt-get', 'dnf', 'zypper', 'brew'):
+        if shutil.which(pm):
+            return pm
+    return None
+
+
+def _run_install(cmd: list) -> bool:
+    import subprocess
+    try:
+        r = subprocess.run(cmd, timeout=300)
+        return r.returncode == 0
+    except Exception as e:
+        _warn(f"Команда {cmd[0]} завершилась с ошибкой: {e}")
+        return False
+
+
+def _ffmpeg_exe() -> Optional[str]:
+    import shutil
+    if shutil.which('ffmpeg'):
+        return 'ffmpeg'
+    cached = DEPS_DIR / ('ffmpeg.exe' if IS_WIN else 'ffmpeg')
+    if cached.exists() and cached.stat().st_size > 100_000:
+        return str(cached)
+    return None
+
+
+def _download_ffmpeg_static() -> bool:
+    import platform, tarfile, zipfile, io
+    machine = platform.machine().lower()
+    dest = DEPS_DIR / ('ffmpeg.exe' if IS_WIN else 'ffmpeg')
+    try:
+        if IS_WIN:
+            url = ('https://github.com/BtbN/FFmpeg-Builds/releases/download/'
+                   'latest/ffmpeg-master-latest-win64-gpl.zip')
+            print("     Скачиваю статичный ffmpeg (~70 MB)...")
+        elif 'aarch64' in machine or 'arm64' in machine:
+            url = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz'
+            print("     Скачиваю статичный ffmpeg (~30 MB)...")
+        else:
+            url = 'https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz'
+            print("     Скачиваю статичный ffmpeg (~30 MB)...")
+
+        import requests as req
+        r = req.get(url, stream=True, timeout=300)
+        r.raise_for_status()
+        data = b''.join(r.iter_content(65536))
+
+        if IS_WIN:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                for name in zf.namelist():
+                    if name.endswith('/bin/ffmpeg.exe'):
+                        dest.write_bytes(zf.read(name))
+                        return True
+        else:
+            with tarfile.open(fileobj=io.BytesIO(data), mode='r:xz') as tf:
+                for member in tf.getmembers():
+                    if member.isfile() and member.name.endswith('/ffmpeg'):
+                        f = tf.extractfile(member)
+                        if f:
+                            dest.write_bytes(f.read())
+                            import stat
+                            dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+                            return True
+    except Exception as e:
+        _warn(f"Ошибка скачивания ffmpeg: {e}")
+    return False
+
+
+def _ensure_ffmpeg():
+    if _ffmpeg_exe():
+        return
+
+    print(f"\n  {C.WARN}ffmpeg не найден{C.R} -- нужен для скачивания HLS-треков из ВК.")
+    pm = _detect_pm()
+
+    install_cmd = None
+    if pm == 'pacman':
+        install_cmd = ['sudo', 'pacman', '-S', '--noconfirm', 'ffmpeg']
+    elif pm == 'apt-get':
+        install_cmd = ['sudo', 'apt-get', 'install', '-y', 'ffmpeg']
+    elif pm == 'dnf':
+        install_cmd = ['sudo', 'dnf', 'install', '-y', 'ffmpeg']
+    elif pm == 'zypper':
+        install_cmd = ['sudo', 'zypper', 'install', '-y', 'ffmpeg']
+    elif pm == 'brew':
+        install_cmd = ['brew', 'install', 'ffmpeg']
+    elif pm == 'winget':
+        install_cmd = ['winget', 'install', '--id', 'Gyan.FFmpeg', '-e', '--source', 'winget']
+
+    if install_cmd:
+        print(f"  Устанавливаю через {install_cmd[0]}...")
+        if _run_install(install_cmd) and _ffmpeg_exe():
+            _ok("ffmpeg установлен!")
+            return
+        _warn("Не удалось через менеджер пакетов, пробую скачать статичный бинарник...")
+
+    if _download_ffmpeg_static() and _ffmpeg_exe():
+        _ok("ffmpeg скачан и готов!")
+        return
+
+    _warn("ffmpeg не удалось установить автоматически.")
+    _warn("HLS-треки (большинство треков ВК) будут пропущены.")
+    if pm == 'pacman':
+        _warn("Установи вручную: sudo pacman -S ffmpeg")
+    elif pm == 'apt-get':
+        _warn("Установи вручную: sudo apt install ffmpeg")
+    elif pm == 'dnf':
+        _warn("Установи вручную: sudo dnf install ffmpeg")
+    elif pm == 'winget':
+        _warn("Установи вручную: winget install ffmpeg")
+    else:
+        _warn("Скачай с https://ffmpeg.org/download.html")
+
+
+def _ensure_browser_cookie3():
+    try:
+        import browser_cookie3  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    print(f"\n  {C.DIM}browser-cookie3 не найден -- авторизация YTM будет ручной.{C.R}")
+    pm = _detect_pm()
+
+    success = False
+    if pm == 'pacman':
+        import shutil
+        aur = shutil.which('yay') or shutil.which('paru')
+        if aur:
+            success = _run_install([aur, '-S', '--noconfirm', 'python-browser-cookie3'])
+        if not success:
+            success = _run_install(['sudo', 'pacman', '-S', '--noconfirm', 'python-browser-cookie3'])
+    else:
+        import shutil
+        pip = shutil.which('pip3') or shutil.which('pip')
+        if pip:
+            success = _run_install([pip, 'install', '--user', '--quiet', 'browser-cookie3'])
+
+    if success:
+        import importlib
+        importlib.invalidate_caches()
+        try:
+            import browser_cookie3  # noqa: F401
+            _ok("browser-cookie3 установлен!")
+        except ImportError:
+            _warn("browser-cookie3 установлен, но недоступен в этом сеансе -- авторизация будет ручной.")
+
+
+def _ensure_deps():
+    _check_python()
+    _ensure_ffmpeg()
+    _ensure_browser_cookie3()
+
+
+# =============================================================================
 # CLI
 # =============================================================================
 
 def main():
     if IS_WIN:
         os.system('')  # ANSI на Windows
+
+    _ensure_deps()
 
     import argparse
     parser = argparse.ArgumentParser(
