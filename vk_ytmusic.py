@@ -17363,11 +17363,28 @@ def _wizard_config():
     _ok(f"Конфиг сохранён: {config_path.name}")
 
 
+def _chrome_base_dir() -> Optional[Path]:
+    """Возвращает папку User Data Chrome для текущей ОС."""
+    if IS_WIN:
+        appdata = os.environ.get('LOCALAPPDATA', '')
+        d = Path(appdata) / 'Google' / 'Chrome' / 'User Data'
+        if d.exists():
+            return d
+        return None
+    for candidate in (
+        Path.home() / '.config/google-chrome',
+        Path.home() / '.config/google-chrome-stable',
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _chrome_profiles() -> list:
     """Возвращает список (dir_name, display_name, email) для всех Chrome профилей."""
     profiles = []
-    chrome_dir = Path.home() / '.config/google-chrome'
-    if not chrome_dir.exists():
+    chrome_dir = _chrome_base_dir()
+    if not chrome_dir:
         return profiles
     for d in sorted(chrome_dir.iterdir()):
         prefs = d / 'Preferences'
@@ -17388,7 +17405,8 @@ def _chrome_profiles() -> list:
 def _extract_cookies_chrome(profile_dir: str) -> Optional[str]:
     try:
         import browser_cookie3
-        cookie_file = str(Path.home() / '.config/google-chrome' / profile_dir / 'Cookies')
+        base = _chrome_base_dir()
+        cookie_file = str(base / profile_dir / 'Cookies') if base else None
         jar = browser_cookie3.chrome(domain_name='.youtube.com', cookie_file=cookie_file)
         cookies = {c.name: c.value for c in jar}
         if 'SAPISID' in cookies:
@@ -17605,13 +17623,31 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 # =============================================================================
 
 def _read_chrome_vk_cookies() -> dict:
-    """Читает VK-куки из Chrome напрямую через sqlite3 + openssl."""
+    """Читает VK-куки из Chrome. Использует browser_cookie3 если доступен, иначе sqlite3+openssl."""
+    # Предпочитаем browser_cookie3 -- он умеет DPAPI (Windows) и libsecret (Linux)
+    try:
+        import browser_cookie3
+        jar = browser_cookie3.chrome(domain_name='.vk.com')
+        cookies = {c.name: c.value for c in jar}
+        if cookies:
+            return cookies
+    except Exception:
+        pass
+
+    # Запасной вариант: sqlite3 + openssl (только Linux, Chrome < 127)
+    if IS_WIN:
+        return {}
+
     import sqlite3, shutil, subprocess, hashlib
-    cookie_paths = [
-        Path.home() / '.config/google-chrome/Default/Cookies',
-        Path.home() / '.config/google-chrome-stable/Default/Cookies',
-        Path.home() / '.config/chromium/Default/Cookies',
-    ]
+    base = _chrome_base_dir()
+    if not base:
+        return {}
+    cookie_paths = [base / 'Default' / 'Cookies']
+    # Добавляем Chromium как запасной вариант
+    chromium = Path.home() / '.config/chromium'
+    if chromium.exists():
+        cookie_paths.append(chromium / 'Default' / 'Cookies')
+
     cookie_file = next((p for p in cookie_paths if p.exists()), None)
     if not cookie_file:
         return {}
@@ -17623,8 +17659,7 @@ def _read_chrome_vk_cookies() -> dict:
         _info(f"Не удалось скопировать cookie DB: {e}")
         return {}
 
-    # Получаем ключ шифрования Chrome из системного keyring
-    password = 'peanuts'  # дефолт когда keyring недоступен
+    password = 'peanuts'
     for lookup in [['secret-tool', 'lookup', 'application', 'chrome'],
                    ['secret-tool', 'lookup', 'application', 'chromium']]:
         try:
@@ -17652,17 +17687,16 @@ def _read_chrome_vk_cookies() -> dict:
                 cookies[name] = value
             elif enc and enc[:3] in (b'v10', b'v11'):
                 try:
-                    r = subprocess.run(
+                    import subprocess as sp
+                    r = sp.run(
                         ['openssl', 'enc', '-d', '-aes-128-cbc',
                          '-K', key.hex(), '-iv', iv.hex(), '-nosalt', '-nopad'],
                         input=enc[3:], capture_output=True, timeout=5)
                     raw = r.stdout
                     if raw:
-                        # Remove PKCS7 padding
                         pad = raw[-1]
                         if 1 <= pad <= 16:
                             raw = raw[:-pad]
-                        # Chrome v10/v11 on Linux prepends 32 random bytes before the actual value
                         if len(raw) > 32:
                             raw = raw[32:]
                         cookies[name] = raw.decode('utf-8', errors='ignore')
