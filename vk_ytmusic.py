@@ -17402,40 +17402,63 @@ def _chrome_profiles() -> list:
     return profiles
 
 
+def _cookies_to_str(cookies: dict) -> Optional[str]:
+    """Проверяет наличие непустого SAPISID и возвращает строку куков."""
+    sapisid = cookies.get('SAPISID') or cookies.get('__Secure-3PAPISID')
+    if not sapisid:
+        return None
+    # Нормализуем: SAPISID должен быть под ключом SAPISID для SAPISIDHASH
+    if 'SAPISID' not in cookies and '__Secure-3PAPISID' in cookies:
+        cookies = dict(cookies)
+        cookies['SAPISID'] = cookies['__Secure-3PAPISID']
+    return '; '.join(f'{k}={v}' for k, v in cookies.items() if v)
+
+
 def _extract_cookies_chrome(profile_dir: str) -> Optional[str]:
     try:
         import browser_cookie3
         base = _chrome_base_dir()
         cookie_file = str(base / profile_dir / 'Cookies') if base else None
         jar = browser_cookie3.chrome(domain_name='.youtube.com', cookie_file=cookie_file)
-        cookies = {c.name: c.value for c in jar}
-        if 'SAPISID' in cookies:
-            return '; '.join(f'{k}={v}' for k, v in cookies.items())
-    except Exception:
-        pass
-    return None
+        cookies = {c.name: c.value for c in jar if c.value}
+        result = _cookies_to_str(cookies)
+        if not result:
+            _warn("Chrome куки получены, но SAPISID пустой или отсутствует.")
+            if IS_WIN:
+                _warn("Chrome 127+ шифрует куки через App-Bound Encryption.")
+                _warn("Попробуй Firefox или Edge -- они лучше поддерживаются.")
+        return result
+    except Exception as e:
+        _warn(f"Ошибка чтения куков Chrome: {e}")
+        if IS_WIN and 'crypt' in str(e).lower():
+            _warn("Chrome 127+ шифрует куки через App-Bound Encryption.")
+            _warn("Попробуй Firefox или Edge -- они лучше поддерживаются.")
+        return None
 
 
 def _extract_cookies_browser(browser: str) -> Optional[str]:
     try:
         import browser_cookie3
         extractors = {
-            'firefox': browser_cookie3.firefox,
-            'opera':   browser_cookie3.opera,
-            'brave':   browser_cookie3.brave,
+            'firefox':  browser_cookie3.firefox,
+            'opera':    browser_cookie3.opera,
+            'brave':    browser_cookie3.brave,
             'chromium': browser_cookie3.chromium,
-            'vivaldi': browser_cookie3.vivaldi,
+            'vivaldi':  browser_cookie3.vivaldi,
+            'edge':     browser_cookie3.edge,
         }
         fn = extractors.get(browser.lower())
         if not fn:
             return None
         jar = fn(domain_name='.youtube.com')
-        cookies = {c.name: c.value for c in jar}
-        if 'SAPISID' in cookies:
-            return '; '.join(f'{k}={v}' for k, v in cookies.items())
-    except Exception:
-        pass
-    return None
+        cookies = {c.name: c.value for c in jar if c.value}
+        result = _cookies_to_str(cookies)
+        if not result:
+            _warn(f"{browser}: SAPISID не найден -- возможно ты не авторизован в YouTube.")
+        return result
+    except Exception as e:
+        _warn(f"Ошибка чтения куков {browser}: {e}")
+        return None
 
 
 def _try_auto_cookie_extract() -> Optional[str]:
@@ -17544,8 +17567,9 @@ def _wizard_ytmusic_auth(auth_file: str, force: bool = False):
                     label = f"Chrome — {name}" + (f" ({email})" if email else "")
                     options.append(('chrome', d, label))
 
-        for browser, fn_name in [('Firefox', 'firefox'), ('Opera', 'opera'),
-                                   ('Brave', 'brave'), ('Chromium', 'chromium')]:
+        for browser, fn_name in [('Firefox', 'firefox'), ('Edge', 'edge'),
+                                   ('Opera', 'opera'), ('Brave', 'brave'),
+                                   ('Chromium', 'chromium')]:
             if hasattr(browser_cookie3, fn_name):
                 options.append((fn_name, None, browser))
 
@@ -18375,13 +18399,21 @@ def _ensure_browser_cookie3():
             success = _run_install([pip, 'install', '--user', '--quiet', 'browser-cookie3'])
 
     if success:
-        import importlib
+        import importlib, site
         importlib.invalidate_caches()
+        # pip --user ставит в user site-packages, который может не быть на sys.path в текущей сессии
+        user_site = site.getusersitepackages()
+        if isinstance(user_site, str):
+            user_site = [user_site]
+        for p in user_site:
+            if p not in sys.path:
+                sys.path.insert(0, p)
         try:
             import browser_cookie3  # noqa: F401
             _ok("browser-cookie3 установлен!")
         except ImportError:
-            _warn("browser-cookie3 установлен, но недоступен в этом сеансе -- авторизация будет ручной.")
+            _warn("browser-cookie3 установлен, но недоступен в этом сеансе.")
+            _warn("Перезапусти скрипт -- при следующем запуске авторизация будет автоматической.")
 
 
 def _ensure_deps():
