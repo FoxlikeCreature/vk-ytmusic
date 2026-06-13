@@ -17432,15 +17432,14 @@ def _extract_cookies_chrome(profile_dir: str) -> Optional[str]:
         result = _cookies_to_str(cookies)
         if not result:
             _warn("Chrome куки получены, но SAPISID пустой или отсутствует.")
-            if IS_WIN:
-                _warn("Chrome 127+ шифрует куки через App-Bound Encryption.")
-                _warn("Попробуй Firefox или Edge -- они лучше поддерживаются.")
         return result
     except Exception as e:
-        _warn(f"Ошибка чтения куков Chrome: {e}")
-        if IS_WIN and 'crypt' in str(e).lower():
-            _warn("Chrome 127+ шифрует куки через App-Bound Encryption.")
-            _warn("Попробуй Firefox или Edge -- они лучше поддерживаются.")
+        msg = str(e)
+        if IS_WIN and ('admin' in msg.lower() or 'access' in msg.lower()):
+            _warn("Chrome 127+ шифрует куки (App-Bound Encryption) -- авто-чтение невозможно.")
+            _warn("Выбери Firefox или Edge из списка, или вставь куки вручную.")
+        else:
+            _warn(f"Ошибка чтения куков Chrome: {msg}")
         return None
 
 
@@ -17673,8 +17672,12 @@ def _read_chrome_vk_cookies() -> dict:
                 cookies = {c.name: c.value for c in jar if c.value}
                 if 'remixsid' in cookies:
                     return cookies
-            except Exception:
-                continue
+            except Exception as e:
+                msg = str(e)
+                if 'admin' in msg.lower() or 'access' in msg.lower():
+                    _info(f"{fn_name}: {msg} (Chrome 127+ шифрует куки, попробуй Firefox или Edge)")
+                else:
+                    _info(f"{fn_name}: {msg}")
     except ImportError:
         pass
 
@@ -17797,12 +17800,11 @@ def _vk_resolve_id(sess, target: str) -> int:
         pass
 
     # Fallback: парсим страницу профиля
-    # Убираем X-Requested-With — иначе ВК возвращает JSON вместо HTML
+    # None в headers явно удаляет заголовок из запроса (requests merge semantics)
     for base_url in (f"https://vk.com/{target}", f"https://m.vk.com/{target}"):
         try:
-            hdrs = {k: v for k, v in sess.headers.items()
-                    if k.lower() != 'x-requested-with'}
-            r = sess.get(base_url, timeout=30, allow_redirects=True, headers=hdrs)
+            r = sess.get(base_url, timeout=30, allow_redirects=True,
+                         headers={'X-Requested-With': None})
             # /id123456 redirect
             if '/id' in r.url:
                 m = re.search(r'/id(\d+)', r.url)
@@ -18123,11 +18125,42 @@ def run(config: dict, dry_run: bool, reset: bool):
     print("Подключаюсь к ВК через браузерную сессию...")
     vk_sess = _vk_browser_session()
     if not vk_sess:
-        _err("VK-сессия не найдена ни в одном браузере.\n"
-             "Убедись что ты залогинен в vk.com в браузере, затем закрой его и попробуй снова.\n"
-             "(browser_cookie3 не может читать куки пока браузер открыт и держит базу заблокированной)")
-        sys.exit(1)
-    _ok("VK-сессия получена из браузера.")
+        _warn("VK-сессия не найдена автоматически.")
+        if IS_WIN:
+            _warn("Chrome 127+ шифрует куки -- авто-чтение невозможно.")
+            _warn("Войди в vk.com в Firefox или Edge, или введи куки вручную.")
+        else:
+            _warn("Закрой браузер и попробуй снова, или введи куки вручную.")
+        print(f"\n  Открой vk.com, войди в аккаунт, F12 → Console → выполни:")
+        print(f"    {C.BOLD}copy(document.cookie){C.R}")
+        print(f"  Вставь сюда:")
+        raw = input("  > ").strip()
+        if not raw:
+            sys.exit(1)
+        cookies: dict = {}
+        for part in raw.split(';'):
+            k, _, v = part.strip().partition('=')
+            if k.strip() and v.strip():
+                cookies[k.strip()] = v.strip()
+        if 'remixsid' not in cookies:
+            _err("remixsid не найден. Убедись что ты залогинен в vk.com.")
+            sys.exit(1)
+        import requests as _req
+        vk_sess = _req.Session()
+        vk_sess.headers['User-Agent'] = (
+            'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 '
+            '(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36')
+        vk_sess.headers['X-Requested-With'] = 'XMLHttpRequest'
+        for k, v in cookies.items():
+            try:
+                v.encode('latin-1')
+                if not any(c in v for c in '",; \t\n\r'):
+                    vk_sess.cookies.set(k, v, domain='.vk.com')
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass
+        _ok("VK-сессия из куков принята.")
+    else:
+        _ok("VK-сессия получена из браузера.")
 
     print("Авторизация в YouTube Music...")
     ytm = _ytm_login(ytm_cfg['auth_file'])
