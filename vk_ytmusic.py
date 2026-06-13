@@ -17912,9 +17912,15 @@ def _make_vk_audio_session(sess):
 
     vk_sess = vk_mod.VkApi()
     vk_sess.http.cookies.update(sess.cookies)
-    vk_sess.http.headers.update(sess.headers)
+    # Только User-Agent — НЕ копируем X-Requested-With: он нужен только для конкретных
+    # API-запросов (и там ставится явно). Если он есть в сессии — m.vk.com вернёт JSON
+    # вместо HTML при инициализации, и аудио-сессия не откроется.
+    ua = sess.headers.get('User-Agent', '')
+    if ua:
+        vk_sess.http.headers['User-Agent'] = ua
     set_cookies_from_list(vk_sess.http.cookies, VkAudio.DEFAULT_COOKIES)
-    vk_sess.http.get('https://m.vk.com/')
+    # Инициализируем мобильную сессию без XHR-заголовка — нужен HTML-ответ
+    vk_sess.http.get('https://m.vk.com/', headers={'X-Requested-With': None})
     return vk_sess
 
 
