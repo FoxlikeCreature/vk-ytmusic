@@ -17388,7 +17388,10 @@ def _chrome_profiles() -> list:
         return profiles
     for d in sorted(chrome_dir.iterdir()):
         prefs = d / 'Preferences'
-        cookies = d / 'Cookies'
+        # Chrome 96+ переместил Cookies в Network/Cookies
+        cookies = d / 'Network' / 'Cookies'
+        if not cookies.exists():
+            cookies = d / 'Cookies'
         if not prefs.exists() or not cookies.exists():
             continue
         try:
@@ -17418,7 +17421,12 @@ def _extract_cookies_chrome(profile_dir: str) -> Optional[str]:
     try:
         import browser_cookie3
         base = _chrome_base_dir()
-        cookie_file = str(base / profile_dir / 'Cookies') if base else None
+        cookie_file = None
+        if base:
+            profile_path = base / profile_dir
+            # Chrome 96+ переместил Cookies в Network/Cookies
+            nw = profile_path / 'Network' / 'Cookies'
+            cookie_file = str(nw if nw.exists() else profile_path / 'Cookies')
         jar = browser_cookie3.chrome(domain_name='.youtube.com', cookie_file=cookie_file)
         cookies = {c.name: c.value for c in jar if c.value}
         result = _cookies_to_str(cookies)
@@ -17647,15 +17655,21 @@ def _is_match(qa: str, qt: str, ra: str, rt: str, threshold: float) -> bool:
 # =============================================================================
 
 def _read_chrome_vk_cookies() -> dict:
-    """Читает VK-куки из Chrome. Использует browser_cookie3 если доступен, иначе sqlite3+openssl."""
-    # Предпочитаем browser_cookie3 -- он умеет DPAPI (Windows) и libsecret (Linux)
+    """Читает VK-куки из любого доступного браузера через browser_cookie3."""
     try:
         import browser_cookie3
-        jar = browser_cookie3.chrome(domain_name='.vk.com')
-        cookies = {c.name: c.value for c in jar}
-        if cookies:
-            return cookies
-    except Exception:
+        for fn_name in ('chrome', 'chromium', 'edge', 'brave', 'firefox', 'opera', 'vivaldi'):
+            fn = getattr(browser_cookie3, fn_name, None)
+            if not fn:
+                continue
+            try:
+                jar = fn(domain_name='.vk.com')
+                cookies = {c.name: c.value for c in jar if c.value}
+                if 'remixsid' in cookies:
+                    return cookies
+            except Exception:
+                continue
+    except ImportError:
         pass
 
     # Запасной вариант: sqlite3 + openssl (только Linux, Chrome < 127)
@@ -18086,8 +18100,9 @@ def run(config: dict, dry_run: bool, reset: bool):
     print("Подключаюсь к ВК через браузерную сессию...")
     vk_sess = _vk_browser_session()
     if not vk_sess:
-        _err("VK-сессия не найдена в браузере.\n"
-             "Убедись что ты залогинен в vk.com в Chrome и попробуй снова.")
+        _err("VK-сессия не найдена ни в одном браузере.\n"
+             "Убедись что ты залогинен в vk.com в браузере, затем закрой его и попробуй снова.\n"
+             "(browser_cookie3 не может читать куки пока браузер открыт и держит базу заблокированной)")
         sys.exit(1)
     _ok("VK-сессия получена из браузера.")
 
@@ -18351,8 +18366,10 @@ def _ensure_ffmpeg():
 
     if install_cmd:
         print(f"  Устанавливаю через {install_cmd[0]}...")
-        if _run_install(install_cmd) and _ffmpeg_exe():
-            _ok("ffmpeg установлен!")
+        _run_install(install_cmd)
+        # winget возвращает ненулевой код если пакет уже установлен — проверяем независимо
+        if _ffmpeg_exe():
+            _ok("ffmpeg готов!")
             return
         _warn("Не удалось через менеджер пакетов, пробую скачать статичный бинарник...")
 
