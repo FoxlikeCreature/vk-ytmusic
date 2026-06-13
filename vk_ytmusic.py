@@ -17869,24 +17869,31 @@ def _vk_resolve_id(sess, target: str) -> int:
         r = sess.get(f"https://vk.com/{target}", timeout=30,
                      allow_redirects=True,
                      headers={'X-Requested-With': None, 'User-Agent': _DESKTOP_UA})
-        _info(f"vk.com/{target} status={r.status_code} url={r.url} body[:300]={r.text[:300]}")
-        # /id123456 redirect
-        if '/id' in r.url:
-            m = re.search(r'/id(\d+)', r.url)
-            if m:
-                return int(m.group(1))
-        # owner_id в HTML
-        for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
-                        r'"id"\s*:\s*(\d+)',
-                        r'page_owner_id["\s:]+(-?\d+)'):
-            m = re.search(pattern, r.text)
-            if m:
-                return int(m.group(1))
+        final_path = r.url.rstrip('/').split('?')[0].split('/')[-1]
+        _info(f"vk.com/{target} status={r.status_code} url={r.url}")
+        # Если VK перебросил на /feed или /login — профиль не тот, парсить бесполезно
+        if final_path in ('feed', 'login', ''):
+            _info(f"Редирект на '{final_path}', пропускаю HTML-парсинг")
+        else:
+            # /id123456 redirect
+            if '/id' in r.url:
+                m = re.search(r'/id(\d+)', r.url)
+                if m:
+                    return int(m.group(1))
+            # owner_id в HTML
+            for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
+                            r'"id"\s*:\s*(\d+)',
+                            r'page_owner_id["\s:]+(-?\d+)'):
+                m = re.search(pattern, r.text)
+                if m:
+                    return int(m.group(1))
     except Exception as e:
         _info(f"vk.com/{target} exception: {e}")
 
-    _err(f"Страница '{target}' не найдена. Проверь 'target' в config.json")
-    sys.exit(1)
+    # Не удалось определить ID статически — возвращаем 0.
+    # _get_vk_tracks подберёт реальный ID из statsMeta.id аудио-пробника.
+    _info(f"Не удалось определить owner_id для '{target}', будет использован statsMeta.id из аудио-запроса")
+    return 0
 
 
 def _get_thumb_url(item: dict) -> str:
@@ -17920,22 +17927,38 @@ def _get_vk_tracks(sess, owner_id: int):
 
     vk_sess = _make_vk_audio_session(sess)
 
-    try:
-        probe = vk_sess.http.post(
+    def _probe(oid):
+        return vk_sess.http.post(
             'https://m.vk.com/audio',
-            data={'act': 'load_section', 'owner_id': owner_id,
+            data={'act': 'load_section', 'owner_id': oid,
                   'playlist_id': -1, 'offset': 0, 'type': 'playlist', 'is_loading_all': 1},
             headers={'X-Requested-With': 'XMLHttpRequest'},
         ).json()
+
+    try:
+        probe = _probe(owner_id)
         _info(f"VK audio probe: {str(probe)[:300]}")
-        meta    = probe.get('statsMeta', {})
+
+        # data=[False] означает что owner_id неверный (например попали на /feed при resolve).
+        # statsMeta.id всегда содержит ID залогиненного пользователя — используем его.
+        data0 = (probe.get('data') or [None])[0]
+        if data0 is False or data0 is None:
+            fallback_id = (probe.get('statsMeta') or {}).get('id')
+            if fallback_id and fallback_id != owner_id:
+                _info(f"owner_id={owner_id} вернул data=[False], пробую statsMeta.id={fallback_id}")
+                owner_id = fallback_id
+                probe = _probe(owner_id)
+                _info(f"VK audio probe (retry): {str(probe)[:300]}")
+                data0 = (probe.get('data') or [None])[0]
+
+        meta    = (probe.get('statsMeta') or {})
         user_id = meta.get('id') or owner_id
-        total   = probe.get('data', [{}])[0].get('totalCount', 0) if probe.get('data') else 0
+        total   = data0.get('totalCount', 0) if isinstance(data0, dict) else 0
     except Exception as e:
         _err(f"Не удалось получить список треков: {e}")
         sys.exit(1)
 
-    if not probe.get('data'):
+    if not probe.get('data') or not isinstance((probe['data'] or [None])[0], dict):
         _err(f"VK вернул пустой ответ (нет 'data'): {str(probe)[:400]}")
         _err("Возможно куки ВК не дают доступ к аудио. Попробуй другой браузер или обнови куки.")
         sys.exit(1)
