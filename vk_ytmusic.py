@@ -17363,6 +17363,29 @@ def _wizard_config():
     _ok(f"Конфиг сохранён: {config_path.name}")
 
 
+def _opera_gx_dirs() -> list:
+    """Возвращает список (cookie_file, label) для Opera GX на текущей ОС."""
+    candidates = []
+    if IS_WIN:
+        appdata = os.environ.get('APPDATA', '')
+        d = Path(appdata) / 'Opera Software' / 'Opera GX Stable'
+        if d.exists():
+            candidates.append(d)
+    else:
+        for d in (Path.home() / '.config' / 'opera-gx',
+                  Path.home() / '.config' / 'opera'):
+            if d.exists():
+                candidates.append(d)
+    result = []
+    for d in candidates:
+        for rel in ('Network/Cookies', 'Cookies'):
+            f = d / rel
+            if f.exists():
+                result.append((str(f), 'Opera GX'))
+                break
+    return result
+
+
 def _chrome_base_dir() -> Optional[Path]:
     """Возвращает папку User Data Chrome для текущей ОС."""
     if IS_WIN:
@@ -17440,6 +17463,25 @@ def _extract_cookies_chrome(profile_dir: str) -> Optional[str]:
             _warn("Выбери Firefox или Edge из списка, или вставь куки вручную.")
         else:
             _warn(f"Ошибка чтения куков Chrome: {msg}")
+        return None
+
+
+def _extract_cookies_chromium_file(cookie_file: str, label: str = '') -> Optional[str]:
+    """Читает куки YouTube из произвольного Chromium cookie-файла (Opera GX и т.п.)."""
+    try:
+        import browser_cookie3
+        jar = browser_cookie3.chrome(domain_name='.youtube.com', cookie_file=cookie_file)
+        cookies = {c.name: c.value for c in jar if c.value}
+        result = _cookies_to_str(cookies)
+        if not result:
+            _warn(f"{label or cookie_file}: SAPISID не найден.")
+        return result
+    except Exception as e:
+        msg = str(e)
+        if IS_WIN and ('admin' in msg.lower() or 'access' in msg.lower()):
+            _warn(f"{label}: Chrome 127+ App-Bound Encryption -- авто-чтение невозможно.")
+        else:
+            _warn(f"Ошибка чтения куков {label}: {msg}")
         return None
 
 
@@ -17580,6 +17622,9 @@ def _wizard_ytmusic_auth(auth_file: str, force: bool = False):
                     label = f"Chrome — {name}" + (f" ({email})" if email else "")
                     options.append(('chrome', d, label))
 
+        for cookie_file, label in _opera_gx_dirs():
+            options.append(('opera_gx', cookie_file, label))
+
         for browser, fn_name in [('Firefox', 'firefox'), ('Edge', 'edge'),
                                    ('Opera', 'opera'), ('Brave', 'brave'),
                                    ('Chromium', 'chromium')]:
@@ -17606,6 +17651,8 @@ def _wizard_ytmusic_auth(auth_file: str, force: bool = False):
                 print(f"  Читаю куки: {label}...")
                 if browser_type == 'chrome' and profile_dir:
                     cookie_str = _extract_cookies_chrome(profile_dir)
+                elif browser_type == 'opera_gx' and profile_dir:
+                    cookie_str = _extract_cookies_chromium_file(profile_dir, label)
                 else:
                     cookie_str = _extract_cookies_browser(browser_type)
 
@@ -17663,6 +17710,16 @@ def _read_chrome_vk_cookies() -> dict:
     """Читает VK-куки из любого доступного браузера через browser_cookie3."""
     try:
         import browser_cookie3
+        # Opera GX — отдельный путь, использует Chrome-движок
+        for cookie_file, label in _opera_gx_dirs():
+            try:
+                jar = browser_cookie3.chrome(domain_name='.vk.com', cookie_file=cookie_file)
+                cookies = {c.name: c.value for c in jar if c.value}
+                if 'remixsid' in cookies:
+                    return cookies
+            except Exception as e:
+                _info(f"{label}: {e}")
+
         for fn_name in ('chrome', 'chromium', 'edge', 'brave', 'firefox', 'opera', 'vivaldi'):
             fn = getattr(browser_cookie3, fn_name, None)
             if not fn:
