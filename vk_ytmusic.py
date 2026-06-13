@@ -17540,8 +17540,14 @@ def _ytm_auth_valid(auth_path: Path) -> bool:
         ytm = YTMusic(str(auth_path))
         ytm.get_liked_songs(limit=1)
         return True
-    except Exception:
-        return False
+    except Exception as e:
+        msg = str(e)
+        _info(f"YTM проверка: {msg[:200]}")
+        # Только явный 401/403 = куки истекли. Сетевые ошибки и прочее — не трогаем.
+        if any(x in msg for x in ('401', '403', 'Unauthorized', 'Forbidden')):
+            return False
+        _info("Ошибка не связана с авторизацией, куки считаются действительными.")
+        return True
 
 
 def _wizard_ytmusic_auth(auth_file: str, force: bool = False):
@@ -17791,23 +17797,40 @@ def _vk_resolve_id(sess, target: str) -> int:
         pass
 
     # Fallback: парсим страницу профиля
-    try:
-        r = sess.get(f"https://vk.com/{target}", timeout=30,
-                     allow_redirects=True)
-        # /id123456 redirect
-        if '/id' in r.url:
-            m = re.search(r'/id(\d+)', r.url)
-            if m:
-                return int(m.group(1))
-        # owner_id в HTML
-        for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
-                        r'"id"\s*:\s*(\d+)',
-                        r'page_owner_id["\s:]+(-?\d+)'):
-            m = re.search(pattern, r.text)
-            if m:
-                return int(m.group(1))
-    except Exception:
-        pass
+    # Убираем X-Requested-With — иначе ВК возвращает JSON вместо HTML
+    for base_url in (f"https://vk.com/{target}", f"https://m.vk.com/{target}"):
+        try:
+            hdrs = {k: v for k, v in sess.headers.items()
+                    if k.lower() != 'x-requested-with'}
+            r = sess.get(base_url, timeout=30, allow_redirects=True, headers=hdrs)
+            # /id123456 redirect
+            if '/id' in r.url:
+                m = re.search(r'/id(\d+)', r.url)
+                if m:
+                    return int(m.group(1))
+            text = r.text
+            # JSON-ответ от ВК (если XHR всё же пробился)
+            if text.lstrip().startswith('{'):
+                try:
+                    data = json.loads(text)
+                    oid = (data.get('user', {}).get('id')
+                           or data.get('id')
+                           or data.get('object_id'))
+                    if oid:
+                        return int(oid)
+                except Exception:
+                    pass
+            # owner_id в HTML
+            for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
+                            r'"id"\s*:\s*(\d+)',
+                            r'page_owner_id["\s:]+(-?\d+)',
+                            r'data-id="(\d+)"',
+                            r'vk\.id\s*=\s*(\d+)'):
+                m = re.search(pattern, text)
+                if m:
+                    return int(m.group(1))
+        except Exception:
+            pass
 
     _err(f"Страница '{target}' не найдена. Проверь 'target' в config.json")
     sys.exit(1)
@@ -18291,6 +18314,31 @@ def _run_install(cmd: list) -> bool:
         return False
 
 
+def _refresh_win_path():
+    """Добавляет в PATH записи из реестра Windows (нужно после winget install)."""
+    if not IS_WIN:
+        return
+    try:
+        import winreg
+        for hkey, subkey in [
+            (winreg.HKEY_LOCAL_MACHINE,
+             r'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'),
+            (winreg.HKEY_CURRENT_USER, r'Environment'),
+        ]:
+            try:
+                key = winreg.OpenKey(hkey, subkey)
+                val, _ = winreg.QueryValueEx(key, 'Path')
+                winreg.CloseKey(key)
+                for p in val.split(os.pathsep):
+                    p = os.path.expandvars(p)
+                    if p and p not in os.environ.get('PATH', ''):
+                        os.environ['PATH'] = os.environ['PATH'] + os.pathsep + p
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _ffmpeg_exe() -> Optional[str]:
     import shutil
     if shutil.which('ffmpeg'):
@@ -18344,6 +18392,7 @@ def _download_ffmpeg_static() -> bool:
 
 
 def _ensure_ffmpeg():
+    _refresh_win_path()
     if _ffmpeg_exe():
         return
 
