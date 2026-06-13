@@ -17416,6 +17416,7 @@ def _save_ytm_auth(auth_path: Path, cookie_str: str):
         "accept-language": "en-US,en;q=0.9",
         "content-type": "application/json",
         "cookie": cookie_str,
+        "origin": "https://music.youtube.com",
         "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "x-goog-authuser": "0",
         "x-youtube-client-name": "67",
@@ -17426,10 +17427,21 @@ def _save_ytm_auth(auth_path: Path, cookie_str: str):
     auth_path.write_text(json.dumps(headers, indent=2), encoding='utf-8')
 
 
-def _wizard_ytmusic_auth(auth_file: str):
+def _ytm_auth_valid(auth_path: Path) -> bool:
+    """Проверяет, работают ли куки для аутентифицированных запросов."""
+    try:
+        from ytmusicapi import YTMusic
+        ytm = YTMusic(str(auth_path))
+        ytm.get_liked_songs(limit=1)
+        return True
+    except Exception:
+        return False
+
+
+def _wizard_ytmusic_auth(auth_file: str, force: bool = False):
     """Авторизация YouTube Music: сначала авто, потом 1 команда в браузере."""
     auth_path = HERE / auth_file
-    if auth_path.exists():
+    if auth_path.exists() and not force:
         return
 
     print(f"\n{C.BOLD}=== Авторизация YouTube Music ==={C.R}\n")
@@ -17755,7 +17767,38 @@ def _upload(ytm, mp3_path: Path, dry_run: bool) -> bool:
 # Загрузка из ВК
 # =============================================================================
 
+def _vk_fresh_url(vk_audio, owner_id: int, audio_id: int) -> str:
+    """Получить свежий MP3 URL для трека, обходя проблему с X-Requested-With."""
+    try:
+        from vk_api.audio import scrap_ids_from_html, scrap_tracks
+        http = vk_audio._vk.http
+        old_xhr = http.headers.pop('X-Requested-With', None)
+        try:
+            resp = http.get(
+                f'https://m.vk.com/audio{owner_id}_{audio_id}',
+                allow_redirects=False
+            )
+            html = resp.text
+            if html.lstrip().startswith('{'):
+                try:
+                    html = json.loads(html).get('html', html)
+                except Exception:
+                    pass
+            ids = scrap_ids_from_html(html, filter_root_el={'class': 'basisDefault'})
+            for t in scrap_tracks(ids, vk_audio.user_id, http=http,
+                                  convert_m3u8_links=vk_audio.convert_m3u8_links):
+                return t.get('url', '')
+        finally:
+            if old_xhr is not None:
+                http.headers['X-Requested-With'] = old_xhr
+    except Exception as e:
+        _warn(f"Ошибка получения свежего URL: {e}")
+    return ''
+
+
 def _download(url: str, retries: int = 3) -> Optional[bytes]:
+    if '.m3u8' in url:
+        return _download_hls(url, retries)
     import requests as req
     for attempt in range(retries):
         try:
@@ -17767,6 +17810,36 @@ def _download(url: str, retries: int = 3) -> Optional[bytes]:
                 time.sleep(5 * (attempt + 1))
             else:
                 _warn(f"Ошибка скачивания: {e}")
+    return None
+
+
+def _download_hls(url: str, retries: int = 3) -> Optional[bytes]:
+    import tempfile, subprocess as sp
+    for attempt in range(retries):
+        tmp = Path(tempfile.mktemp(suffix='.mp3'))
+        try:
+            r = sp.run(
+                ['ffmpeg', '-y', '-i', url, '-vn', '-c:a', 'libmp3lame', '-q:a', '2',
+                 '-loglevel', 'error', str(tmp)],
+                capture_output=True, timeout=120
+            )
+            if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+                data = tmp.read_bytes()
+                return data
+            if attempt < retries - 1:
+                time.sleep(5 * (attempt + 1))
+            else:
+                _warn(f"ffmpeg HLS ошибка: {r.stderr.decode('utf-8', errors='replace')[:200]}")
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(5 * (attempt + 1))
+            else:
+                _warn(f"Ошибка HLS скачивания: {e}")
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
     return None
 
 
@@ -17944,12 +18017,8 @@ def run(config: dict, dry_run: bool, reset: bool):
         print(f"\nПовторная попытка для {len(retry_queue)} треков...")
         for track in retry_queue:
             label = f"{track['artist']} - {track['title']}"
-            try:
-                parts = track['id'].split('_', 1)
-                fresh = vk_audio.get_audio_by_id(int(parts[0]), int(parts[1]))
-                url   = fresh.get('url', '') if fresh else ''
-            except Exception:
-                url = track['url']
+            parts = track['id'].split('_', 1)
+            url = _vk_fresh_url(vk_audio, int(parts[0]), int(parts[1])) or track['url']
             if not url:
                 _warn(f"Нет URL при ретрае: {label}")
                 stats['errors'] += 1
@@ -18012,6 +18081,8 @@ def main():
                         help='Тест без реальных изменений')
     parser.add_argument('--reset',   action='store_true',
                         help='Начать заново, сбросив прогресс')
+    parser.add_argument('--reauth-ytm', action='store_true',
+                        help='Обновить авторизацию YouTube Music (куки устарели)')
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -18031,8 +18102,14 @@ def main():
         _err(f"Ошибка в config.json: {e}")
         sys.exit(1)
 
-    # Авторизация YT Music (запускается автоматически если нет oauth.json)
-    _wizard_ytmusic_auth(config['ytmusic']['auth_file'])
+    # Авторизация YT Music
+    _wizard_ytmusic_auth(config['ytmusic']['auth_file'], force=getattr(args, 'reauth_ytm', False))
+
+    # Тихая проверка: если куки устарели — переавторизоваться автоматически
+    auth_path = HERE / config['ytmusic']['auth_file']
+    if auth_path.exists() and not _ytm_auth_valid(auth_path):
+        _warn("Куки YouTube Music устарели, обновляю...")
+        _wizard_ytmusic_auth(config['ytmusic']['auth_file'], force=True)
 
     run(config, dry_run=args.dry_run, reset=args.reset)
 
