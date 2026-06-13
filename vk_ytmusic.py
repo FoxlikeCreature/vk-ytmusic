@@ -17976,9 +17976,11 @@ def run(config: dict, dry_run: bool, reset: bool):
             stats['skipped'] += 1
             continue
 
+        _STUB = {'', 'unknown', 'untitled', 'без названия', 'неизвестный исполнитель', 'неизвестный'}
+        skip_search = (track['artist'].lower() in _STUB and track['title'].lower() in _STUB)
 
         try:
-            result = _search_ytmusic(ytm, track['artist'], track['title'], threshold)
+            result = None if skip_search else _search_ytmusic(ytm, track['artist'], track['title'], threshold)
 
             if result:
                 vid = result.get('videoId', '')
