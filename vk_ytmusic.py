@@ -17711,11 +17711,14 @@ def _read_chrome_vk_cookies() -> dict:
     try:
         import browser_cookie3
         # Opera GX — отдельный путь, использует Chrome-движок
+        def _has_vk_session(c: dict) -> bool:
+            return 'remixsid' in c or 'remixstid' in c
+
         for cookie_file, label in _opera_gx_dirs():
             try:
                 jar = browser_cookie3.chrome(domain_name='.vk.com', cookie_file=cookie_file)
                 cookies = {c.name: c.value for c in jar if c.value}
-                if 'remixsid' in cookies:
+                if _has_vk_session(cookies):
                     return cookies
             except Exception as e:
                 _info(f"{label}: {e}")
@@ -17727,7 +17730,7 @@ def _read_chrome_vk_cookies() -> dict:
             try:
                 jar = fn(domain_name='.vk.com')
                 cookies = {c.name: c.value for c in jar if c.value}
-                if 'remixsid' in cookies:
+                if _has_vk_session(cookies):
                     return cookies
             except Exception as e:
                 msg = str(e)
@@ -17818,7 +17821,7 @@ def _read_chrome_vk_cookies() -> dict:
 
 def _vk_browser_session():
     cookies = _read_chrome_vk_cookies()
-    if 'remixsid' not in cookies:
+    if 'remixsid' not in cookies and 'remixstid' not in cookies:
         return None
     import requests as req_mod
     sess = req_mod.Session()
@@ -17849,17 +17852,24 @@ def _vk_resolve_id(sess, target: str) -> int:
     try:
         r = sess.get(f"{VK_API_BASE}/utils.resolveScreenName",
                      params={"screen_name": target, "v": VK_V}, timeout=30)
+        _info(f"resolveScreenName status={r.status_code} body={r.text[:200]}")
         res = r.json().get("response") or {}
         if res and res.get("object_id"):
             oid = res["object_id"]
             return -oid if res.get("type") == "group" else oid
-    except Exception:
-        pass
+    except Exception as e:
+        _info(f"resolveScreenName exception: {e}")
 
-    # Fallback: парсим страницу профиля
+    # Fallback: парсим страницу профиля.
+    # Используем десктопный UA + убираем XHR чтобы vk.com не редиректил на m.vk.com
+    # и отдал HTML, а не JSON-ответ мобильного API.
+    _DESKTOP_UA = ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
+                   '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     try:
         r = sess.get(f"https://vk.com/{target}", timeout=30,
-                     allow_redirects=True)
+                     allow_redirects=True,
+                     headers={'X-Requested-With': None, 'User-Agent': _DESKTOP_UA})
+        _info(f"vk.com/{target} status={r.status_code} url={r.url} body[:300]={r.text[:300]}")
         # /id123456 redirect
         if '/id' in r.url:
             m = re.search(r'/id(\d+)', r.url)
@@ -17872,8 +17882,8 @@ def _vk_resolve_id(sess, target: str) -> int:
             m = re.search(pattern, r.text)
             if m:
                 return int(m.group(1))
-    except Exception:
-        pass
+    except Exception as e:
+        _info(f"vk.com/{target} exception: {e}")
 
     _err(f"Страница '{target}' не найдена. Проверь 'target' в config.json")
     sys.exit(1)
@@ -18178,9 +18188,16 @@ def run(config: dict, dry_run: bool, reset: bool):
             _warn("Войди в vk.com в Firefox или Edge, или введи куки вручную.")
         else:
             _warn("Закрой браузер и попробуй снова, или введи куки вручную.")
-        print(f"\n  Открой vk.com, войди в аккаунт, F12 → Console → выполни:")
-        print(f"    {C.BOLD}copy(document.cookie){C.R}")
-        print(f"  Вставь сюда:")
+        print(f"\n  Как получить куки ВКонтакте:")
+        print(f"  1. Открой {C.BOLD}vk.com{C.R} и войди в аккаунт.")
+        print(f"  2. Открой DevTools: {C.BOLD}F12{C.R}")
+        print(f"  3. Вкладка {C.BOLD}Network{C.R} (Сеть)")
+        print(f"  4. Обнови страницу (F5)")
+        print(f"  5. Кликни на любой запрос к vk.com в списке")
+        print(f"  6. Вкладка {C.BOLD}Headers{C.R} → раздел {C.BOLD}Request Headers{C.R}")
+        print(f"  7. Найди строку {C.BOLD}cookie:{C.R} — скопируй всё значение после двоеточия")
+        print()
+        print(f"  Вставь куки сюда:")
         raw = input("  > ").strip()
         if not raw:
             sys.exit(1)
@@ -18189,8 +18206,10 @@ def run(config: dict, dry_run: bool, reset: bool):
             k, _, v = part.strip().partition('=')
             if k.strip() and v.strip():
                 cookies[k.strip()] = v.strip()
-        if 'remixsid' not in cookies:
-            _err("remixsid не найден. Убедись что ты залогинен в vk.com.")
+        if 'remixsid' not in cookies and 'remixstid' not in cookies:
+            _err("Не найден ни remixsid, ни remixstid.")
+            _err("Убедись что ты скопировал куки из Network-вкладки (не из Console),")
+            _err("и что ты залогинен в vk.com.")
             sys.exit(1)
         import requests as _req
         vk_sess = _req.Session()
