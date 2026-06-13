@@ -17852,13 +17852,12 @@ def _vk_resolve_id(sess, target: str) -> int:
     try:
         r = sess.get(f"{VK_API_BASE}/utils.resolveScreenName",
                      params={"screen_name": target, "v": VK_V}, timeout=30)
-        _info(f"resolveScreenName status={r.status_code} body={r.text[:200]}")
         res = r.json().get("response") or {}
         if res and res.get("object_id"):
             oid = res["object_id"]
             return -oid if res.get("type") == "group" else oid
-    except Exception as e:
-        _info(f"resolveScreenName exception: {e}")
+    except Exception:
+        pass
 
     # Fallback: парсим страницу профиля.
     # Используем десктопный UA + убираем XHR чтобы vk.com не редиректил на m.vk.com
@@ -17870,29 +17869,22 @@ def _vk_resolve_id(sess, target: str) -> int:
                      allow_redirects=True,
                      headers={'X-Requested-With': None, 'User-Agent': _DESKTOP_UA})
         final_path = r.url.rstrip('/').split('?')[0].split('/')[-1]
-        _info(f"vk.com/{target} status={r.status_code} url={r.url}")
         # Если VK перебросил на /feed или /login — профиль не тот, парсить бесполезно
-        if final_path in ('feed', 'login', ''):
-            _info(f"Редирект на '{final_path}', пропускаю HTML-парсинг")
-        else:
-            # /id123456 redirect
+        if final_path not in ('feed', 'login', ''):
             if '/id' in r.url:
                 m = re.search(r'/id(\d+)', r.url)
                 if m:
                     return int(m.group(1))
-            # owner_id в HTML
             for pattern in (r'"owner_id"\s*:\s*(-?\d+)',
                             r'"id"\s*:\s*(\d+)',
                             r'page_owner_id["\s:]+(-?\d+)'):
                 m = re.search(pattern, r.text)
                 if m:
                     return int(m.group(1))
-    except Exception as e:
-        _info(f"vk.com/{target} exception: {e}")
+    except Exception:
+        pass
 
-    # Не удалось определить ID статически — возвращаем 0.
-    # _get_vk_tracks подберёт реальный ID из statsMeta.id аудио-пробника.
-    _info(f"Не удалось определить owner_id для '{target}', будет использован statsMeta.id из аудио-запроса")
+    # Не удалось определить ID — _get_vk_tracks возьмёт его из statsMeta.id пробника.
     return 0
 
 
@@ -17937,7 +17929,6 @@ def _get_vk_tracks(sess, owner_id: int):
 
     try:
         probe = _probe(owner_id)
-        _info(f"VK audio probe: {str(probe)[:300]}")
 
         # data=[False] означает что owner_id неверный (например попали на /feed при resolve).
         # statsMeta.id всегда содержит ID залогиненного пользователя — используем его.
@@ -17945,15 +17936,9 @@ def _get_vk_tracks(sess, owner_id: int):
         if data0 is False or data0 is None:
             fallback_id = (probe.get('statsMeta') or {}).get('id')
             if fallback_id and fallback_id != owner_id:
-                _info(f"owner_id={owner_id} вернул data=[False], пробую statsMeta.id={fallback_id}")
                 owner_id = fallback_id
                 probe = _probe(owner_id)
-                _info(f"VK audio probe (retry): {str(probe)[:500]}")
                 data0 = (probe.get('data') or [None])[0]
-
-        if isinstance(data0, dict):
-            _info(f"data0 keys: {list(data0.keys())}")
-            _info(f"data0 totalCount={data0.get('totalCount')} accessHash={data0.get('accessHash') or data0.get('access_hash')}")
 
         meta    = (probe.get('statsMeta') or {})
         user_id = meta.get('id') or owner_id
@@ -18268,7 +18253,6 @@ def run(config: dict, dry_run: bool, reset: bool):
 
     print(f"Определяем страницу '{vk_cfg['target']}'...")
     owner_id = _vk_resolve_id(vk_sess, vk_cfg['target'])
-    _info(f"owner_id = {owner_id}")
 
     print("Подключаюсь к ВК, считаю треки...")
     total, track_gen, vk_audio = _get_vk_tracks(vk_sess, owner_id)
