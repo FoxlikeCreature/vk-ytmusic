@@ -17976,12 +17976,6 @@ def run(config: dict, dry_run: bool, reset: bool):
             stats['skipped'] += 1
             continue
 
-        _STUB = {'', 'unknown', 'untitled', 'без названия', 'неизвестный исполнитель', 'неизвестный'}
-        if (track['artist'].lower() in _STUB and track['title'].lower() in _STUB):
-            done_ids.add(track_id)
-            _save_progress(resume_path, done_ids)
-            stats['skipped'] += 1
-            continue
 
         try:
             result = _search_ytmusic(ytm, track['artist'], track['title'], threshold)
